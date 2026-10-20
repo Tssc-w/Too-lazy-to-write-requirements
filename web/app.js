@@ -1,6 +1,7 @@
 (() => {
-  const state = { research: null, researchJobId: '', selectedProductIds: [], analysis: null, analysisJobId: '', busy: false, analysisBusy: false, adminRequired: false, deploymentConfigReadonly: false, aiApiKey: '', brightdataConfigured: false };
+  const state = { research: null, researchJobId: '', selectedProductIds: [], analysis: null, analysisJobId: '', busy: false, analysisBusy: false, aiApiKey: '', brightdataConfigured: false };
   const AI_SETTINGS_KEY = 'imageBriefUserAISettings';
+  const BRIGHTDATA_SETTINGS_KEY = 'imageBriefUserBrightDataSettings';
   const $ = (selector, root = document) => root.querySelector(selector);
   const STRUCTURE = [
     ['顺序与结构', 'sequence'], ['视觉风格', 'style'], ['构图', 'composition'],
@@ -29,16 +30,12 @@
     try {
       const response = await fetch('/api/config', { cache: 'no-store' });
       const config = await response.json();
-      state.brightdataConfigured = Boolean(config.brightdata_configured);
-      state.adminRequired = Boolean(config.admin_required);
-      state.deploymentConfigReadonly = Boolean(config.deployment_config_readonly);
-      $('#brightdata-zone').value = config.brightdata_zone || '';
-      $('#collector-settings').classList.toggle('hidden', state.deploymentConfigReadonly);
-      $('#vercel-collector-note').classList.toggle('hidden', !state.deploymentConfigReadonly);
       loadAISettings(config.api_base_url);
+      loadBrightDataSettings();
       updateServiceStatus();
     } catch (_) {
       loadAISettings('');
+      loadBrightDataSettings();
       $('#service-status').textContent = '服务暂未连接';
     }
   }
@@ -53,11 +50,17 @@
     $('#vision-model-input').disabled = $('#use-provider-default').checked;
     $('#relay-model-select').disabled = $('#use-provider-default').checked || $('#relay-model-select').options.length < 2;
   }
+  function loadBrightDataSettings() {
+    let saved = {};
+    try { saved = JSON.parse(sessionStorage.getItem(BRIGHTDATA_SETTINGS_KEY) || '{}'); } catch (_) { }
+    $('#brightdata-api-token').value = String(saved.apiToken || '');
+    $('#brightdata-zone').value = String(saved.zone || '');
+    state.brightdataConfigured = Boolean(saved.apiToken && saved.zone);
+  }
   function updateServiceStatus() {
     const aiStatus = state.aiApiKey ? '个人 AI Key 已保存' : '请填写个人 AI Key';
-    const collectorStatus = `Bright Data 回退${state.brightdataConfigured ? '已配置' : '未配置'}`;
-    const configStatus = state.deploymentConfigReadonly ? ' · 公共采集设置由站点管理员维护' : state.adminRequired ? ' · 采集设置仅管理员可修改' : '';
-    $('#service-status').textContent = `${aiStatus} · ${collectorStatus}${configStatus}`;
+    const collectorStatus = state.brightdataConfigured ? '个人 Bright Data 已保存' : '个人 Bright Data 未设置（可选）';
+    $('#service-status').textContent = `${aiStatus} · ${collectorStatus}`;
     $('#service-status').style.color = state.aiApiKey || state.brightdataConfigured ? '#23746a' : '';
   }
   function aiSettingsPayload() {
@@ -79,26 +82,21 @@
     updateServiceStatus();
     message('#research-message', '个人 AI 设置已保存在此浏览器标签页；关闭标签页后会清除。', 'success');
   }
-  async function saveCollectorSettings() {
-    if (state.deploymentConfigReadonly) { message('#research-message', 'Vercel 部署的公共采集设置请由站点管理员在项目环境变量中维护。', 'error'); return; }
-    const button = $('#save-collector-settings');
-    button.disabled = true;
+  function saveCollectorSettings() {
+    const apiToken = $('#brightdata-api-token').value.trim();
+    const zone = $('#brightdata-zone').value.trim();
+    if (Boolean(apiToken) !== Boolean(zone)) { message('#research-message', '请同时填写 Bright Data API Key 和 Web Unlocker Zone，或两项都留空。', 'error'); return; }
     try {
-      const response = await jsonFetch('/api/config', { method: 'POST', body: JSON.stringify({
-        admin_token: $('#admin-token').value.trim(),
-        brightdata_api_token: $('#brightdata-api-token').value.trim(),
-        brightdata_zone: $('#brightdata-zone').value.trim(),
-      }) });
-      const result = await response.json();
-      if (!response.ok) throw new Error(result.error || '保存失败');
-      $('#brightdata-api-token').value = '';
-      state.brightdataConfigured = Boolean(result.brightdata_configured);
-      state.adminRequired = Boolean(result.admin_required);
+      if (apiToken && zone) sessionStorage.setItem(BRIGHTDATA_SETTINGS_KEY, JSON.stringify({ apiToken, zone }));
+      else sessionStorage.removeItem(BRIGHTDATA_SETTINGS_KEY);
+      state.brightdataConfigured = Boolean(apiToken && zone);
       updateServiceStatus();
-      const fallbackReady = state.brightdataConfigured ? 'Bright Data 回退采集已配置。' : 'Bright Data 回退未配置；直连失败时会显示配置提示。';
-      message('#research-message', `${fallbackReady} 设置保存在服务进程内。`, state.brightdataConfigured ? 'success' : '');
-    } catch (error) { message('#research-message', error.message, 'error'); }
-    finally { button.disabled = false; }
+      message('#research-message', state.brightdataConfigured
+        ? '个人 Bright Data 设置已保存到此浏览器标签页；只会随你的商品采集请求发送。'
+        : '已清除此标签页保存的个人 Bright Data 设置。', 'success');
+    } catch (_) {
+      message('#research-message', '浏览器无法保存当前标签页设置，请检查浏览器存储权限。', 'error');
+    }
   }
 
   async function loadRelayModels() {
@@ -137,6 +135,13 @@
 
   async function startResearch() {
     const payload = productPayload();
+    const brightdataApiToken = $('#brightdata-api-token').value.trim();
+    const brightdataZone = $('#brightdata-zone').value.trim();
+    if (Boolean(brightdataApiToken) !== Boolean(brightdataZone)) {
+      message('#research-message', '请同时填写 Bright Data API Key 和 Web Unlocker Zone，或两项都留空。', 'error'); return;
+    }
+    payload.brightdata_api_token = brightdataApiToken;
+    payload.brightdata_zone = brightdataZone;
     if (!payload.product_url && !payload.reference_urls.length) {
       message('#research-message', '请填写我方商品链接或至少一条参考商品链接。', 'error'); return;
     }
@@ -145,10 +150,10 @@
     }
     state.busy = true; state.research = null; state.analysis = null; state.selectedProductIds = [];
     $('#research-section').classList.remove('hidden'); $('#analysis-section').classList.add('hidden');
-    $('#product-list').innerHTML = '<div class="empty-state">正在读取商品网页；直连失败时会使用已配置的 Bright Data 回退…</div>';
+    $('#product-list').innerHTML = '<div class="empty-state">正在读取商品网页；直连失败时会尝试使用你自己的 Bright Data（如已填写）…</div>';
     $('#warnings').classList.add('hidden'); $('#analyze-button').disabled = true;
     $('#research-button').disabled = true; $('#research-button').textContent = '读取中…';
-    message('#research-message', '开始读取商品链接；直连失败的链接会尝试 Bright Data（如已配置）。');
+    message('#research-message', '开始读取商品链接；直连失败的链接会尝试使用你提供的 Bright Data（如已填写）。');
     $('#research-section').scrollIntoView({ behavior: 'smooth', block: 'start' });
     try {
       const response = await jsonFetch('/api/research', { method: 'POST', body: JSON.stringify(payload) });

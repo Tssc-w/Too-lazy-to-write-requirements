@@ -5,7 +5,6 @@ import contextvars
 import datetime as dt
 import html
 import hashlib
-import hmac
 import http.client
 from html.parser import HTMLParser
 import ipaddress
@@ -37,7 +36,6 @@ WEB_DIR = ROOT / "web"
 TEMPLATE_PATH = ROOT / "templates" / "做图需求表模版-10.12.xlsx"
 PORT = int(os.environ.get("IMAGEREQ_PORT", os.environ.get("PORT", "8766")))
 HOST = os.environ.get("IMAGEREQ_HOST", "127.0.0.1").strip() or "127.0.0.1"
-ADMIN_TOKEN = os.environ.get("IMAGEREQ_ADMIN_TOKEN", "").strip()
 VERCEL_RUNTIME = os.environ.get("VERCEL", "").lower() == "1"
 DEFAULT_AI_API_BASE_URL = os.environ.get("OPENAI_API_BASE_URL", "https://api.apimart.ai/v1").strip().rstrip("/") or "https://api.apimart.ai/v1"
 OPENAI_VISION_MODEL = os.environ.get("OPENAI_VISION_MODEL", "").strip()
@@ -54,8 +52,6 @@ ANALYSIS_MAX_WORKERS = 2
 _ai_api_key = ""
 _ai_api_base_url = DEFAULT_AI_API_BASE_URL
 _ai_vision_model = OPENAI_VISION_MODEL
-_brightdata_api_token = os.environ.get("BRIGHTDATA_API_TOKEN", "").strip()
-_brightdata_zone = os.environ.get("BRIGHTDATA_WEB_UNLOCKER_ZONE", "").strip()
 _ai_config_lock = threading.Lock()
 _jobs: dict[str, dict] = {}
 _jobs_lock = threading.Lock()
@@ -493,15 +489,9 @@ def submit_with_context(executor, function, *args):
     return executor.submit(context.run, function, *args)
 
 
-def get_brightdata_config():
-    with _ai_config_lock:
-        return _brightdata_api_token, _brightdata_zone
-
-
-def fetch_brightdata_product(url, role):
-    api_token, zone = get_brightdata_config()
+def fetch_brightdata_product(url, role, api_token, zone):
     if not api_token or not zone:
-        raise ValueError("Bright Data 回退未配置：请填写 Bright Data API Token 和 Web Unlocker Zone。")
+        raise ValueError("本次请求未提供完整的 Bright Data API Key 和 Web Unlocker Zone。")
     normalized_url = _public_http_url(url)
     body = json.dumps({"zone": zone, "url": normalized_url, "format": "raw"}).encode("utf-8")
     request = urllib.request.Request("https://api.brightdata.com/request", data=body, method="POST", headers={
@@ -648,8 +638,9 @@ def extract_sse_chat_content(response_body, api_key, request_id):
     return content
 
 
-def perform_research(job_id, payload):
+def perform_research(job_id, payload, brightdata_config=None):
     try:
+        api_token, zone = brightdata_config or ("", "")
         product_url = text(payload.get("product_url"), 2000)
         raw_references = payload.get("reference_urls") or []
         if isinstance(raw_references, str):
@@ -679,7 +670,7 @@ def perform_research(job_id, payload):
         items = []
         if unique:
             total = len(unique)
-            update_job(job_id, status="正在读取商品页", progress=f"正在尝试直连读取 {total} 个商品页；直连失败时会尝试 Bright Data 回退（如已配置）", completed=0, total=total)
+            update_job(job_id, status="正在读取商品页", progress=f"正在尝试直连读取 {total} 个商品页；直连失败时会尝试本次访客提供的 Bright Data（如已配置）", completed=0, total=total)
             items = [None] * total
             direct_failures = {}
             with ThreadPoolExecutor(max_workers=min(4, total)) as pool:
@@ -704,12 +695,11 @@ def perform_research(job_id, payload):
                         }
                     update_job(job_id, progress=f"已处理 {completed}/{total} 个商品页", completed=completed, total=total)
             if direct_failures:
-                api_token, zone = get_brightdata_config()
                 if api_token and zone:
                     update_job(job_id, status="直采失败，Bright Data 正在回退", progress=f"直采成功 {total - len(direct_failures)}/{total}；正在通过 Bright Data 重试 {len(direct_failures)} 条失败链接", completed=total - len(direct_failures), total=total)
                     with ThreadPoolExecutor(max_workers=min(2, len(direct_failures))) as pool:
                         futures = {
-                            pool.submit(fetch_brightdata_product, url, role): (index, url, role, direct_error)
+                            pool.submit(fetch_brightdata_product, url, role, api_token, zone): (index, url, role, direct_error)
                             for index, (url, role, direct_error) in direct_failures.items()
                         }
                         for future in as_completed(futures):
@@ -731,7 +721,7 @@ def perform_research(job_id, payload):
                             update_job(job_id, progress=f"直采失败链接已由 Bright Data 处理；当前完成 {sum(1 for item in items if item and item.get('fetch_method') != 'failed')}/{total}", completed=sum(1 for item in items if item and item.get("fetch_method") != "failed"), total=total)
                 else:
                     for index, (url, role, direct_error) in direct_failures.items():
-                        failure = f"直采失败：{direct_error}；Bright Data 未配置，无法回退。请在设置中填写 Bright Data API Token 和 Web Unlocker Zone。"
+                        failure = f"直采失败：{direct_error}；本次未提供个人 Bright Data API Key 和 Web Unlocker Zone，无法回退。"
                         items[index]["status"] = failure
                         warnings.append({"source": url, "message": failure})
             items = [item for item in items if item]
@@ -742,7 +732,7 @@ def perform_research(job_id, payload):
         summary = {
             "product_name": name, "sku": text(payload.get("sku"), 100), "items": items,
             "warnings": warnings, "searched_at": dt.datetime.now().isoformat(timespec="seconds"),
-            "collection_method": "支持任意公开商品网页；优先直采，失败后对该链接尝试 Bright Data 回退",
+            "collection_method": "支持任意公开商品网页；优先直采，失败后使用本次请求访客提供的 Bright Data 凭据回退",
         }
         update_job(job_id, status="采集完成" if items else "未采集到商品", progress="商品页读取结束。未返回字段以缺失状态显示。", result=summary, done=True, completed=len(items), total=len(items))
     except Exception as exc:
@@ -1524,8 +1514,7 @@ class Handler(BaseHTTPRequestHandler):
         elif path in ("/style.css", "/app.js"):
             target = WEB_DIR / path.rsplit("/", 1)[-1]
         elif path == "/api/config":
-            brightdata_token, brightdata_zone = get_brightdata_config()
-            self.send_json({"api_base_url": _ai_api_base_url, "brightdata_configured": bool(brightdata_token and brightdata_zone), "brightdata_zone": brightdata_zone, "admin_required": bool(ADMIN_TOKEN), "deployment_config_readonly": VERCEL_RUNTIME, "collection_method": "direct_then_brightdata"})
+            self.send_json({"api_base_url": _ai_api_base_url, "collection_method": "direct_then_request_user_brightdata"})
             return
         elif path.startswith("/api/jobs/"):
             job = job_snapshot(path.rsplit("/", 1)[-1])
@@ -1555,21 +1544,7 @@ class Handler(BaseHTTPRequestHandler):
         try:
             payload = self.read_json()
             if path == "/api/config":
-                if VERCEL_RUNTIME:
-                    self.send_json({"error": "Vercel 上的公共采集服务设置由站点管理员在 Vercel 环境变量中维护。"}, 409)
-                    return
-                if ADMIN_TOKEN and not hmac.compare_digest(text(payload.get("admin_token"), 500), ADMIN_TOKEN):
-                    self.send_json({"error": "管理员密码不正确，不能修改公共服务设置。"}, 403)
-                    return
-                old_brightdata_token, old_brightdata_zone = get_brightdata_config()
-                brightdata_token = text(payload.get("brightdata_api_token"), 1000).strip()
-                brightdata_zone = text(payload.get("brightdata_zone", old_brightdata_zone), 200).strip()
-                with _ai_config_lock:
-                    global _brightdata_api_token, _brightdata_zone
-                    _brightdata_api_token = brightdata_token if brightdata_token else ("" if payload.get("clear_brightdata_api_token") else old_brightdata_token)
-                    _brightdata_zone = brightdata_zone
-                    brightdata_configured = bool(_brightdata_api_token and _brightdata_zone)
-                self.send_json({"brightdata_configured": brightdata_configured, "brightdata_zone": _brightdata_zone, "admin_required": bool(ADMIN_TOKEN), "message": "Bright Data 回退设置仅保存在当前服务进程内。"})
+                self.send_json({"error": "Bright Data 凭据由每位访客随商品读取请求单独提供；请在浏览器的个人采集设置中填写。"}, 410)
                 return
             if path == "/api/models":
                 api_key = text(self.headers.get("X-User-AI-Key"), 1000)
@@ -1588,6 +1563,13 @@ class Handler(BaseHTTPRequestHandler):
                     _request_ai_config.reset(context_token)
                 return
             if path == "/api/research":
+                brightdata_api_token = text(payload.pop("brightdata_api_token", ""), 1000).strip()
+                brightdata_zone = text(payload.pop("brightdata_zone", ""), 200).strip()
+                if bool(brightdata_api_token) != bool(brightdata_zone):
+                    raise ValueError("请同时填写 Bright Data API Key 和 Web Unlocker Zone，或两项都留空。")
+                if any(ord(character) < 32 for character in brightdata_api_token + brightdata_zone):
+                    raise ValueError("Bright Data 凭据格式无效。")
+                brightdata_config = (brightdata_api_token, brightdata_zone)
                 references = payload.get("reference_urls") or []
                 if isinstance(references, str):
                     references = [line.strip() for line in references.splitlines() if line.strip()]
@@ -1604,11 +1586,11 @@ class Handler(BaseHTTPRequestHandler):
                     while len(_jobs) > 80:
                         _jobs.pop(next(iter(_jobs)))
                 if VERCEL_RUNTIME:
-                    perform_research(job_id, payload)
+                    perform_research(job_id, payload, brightdata_config)
                     completed_job = job_snapshot(job_id) or job
                     self.send_json(completed_job)
                 else:
-                    threading.Thread(target=perform_research, args=(job_id, payload), daemon=True).start()
+                    threading.Thread(target=perform_research, args=(job_id, payload, brightdata_config), daemon=True).start()
                     self.send_json(job, 202)
                 return
             if path == "/api/analyze":
@@ -1665,11 +1647,9 @@ class Handler(BaseHTTPRequestHandler):
 if __name__ == "__main__":
     if not TEMPLATE_PATH.exists():
         raise SystemExit(f"找不到模板：{TEMPLATE_PATH}")
-    if HOST not in {"127.0.0.1", "localhost", "::1"} and len(ADMIN_TOKEN) < 24:
-        raise SystemExit("公开网络绑定前必须设置至少 24 个字符的 IMAGEREQ_ADMIN_TOKEN，以保护公共服务设置。")
     server = ThreadingHTTPServer((HOST, PORT), Handler)
     print(f"图需工作台已启动：http://{HOST}:{PORT}")
-    print("商品页支持任意可公开访问的 HTTP(S) 网页；优先直采，失败时可使用 Bright Data 回退。按 Ctrl+C 停止。")
+    print("商品页支持任意可公开访问的 HTTP(S) 网页；优先直采，失败后可使用访客本次提供的 Bright Data 回退。按 Ctrl+C 停止。")
     try:
         server.serve_forever()
     except KeyboardInterrupt:

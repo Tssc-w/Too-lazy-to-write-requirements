@@ -17,13 +17,13 @@ Set-ExecutionPolicy -Scope Process Bypass
 
 ## 商品链接读取范围
 
-接受任意平台的公开 `http://` 或 `https://` 商品页链接，不限制 Amazon。先尝试直连读取；直连失败时，如服务已配置 Bright Data Web Unlocker，则用它重试。页面会保留两次尝试的状态和原因。仅支持公开网页：需要登录、验证码、JavaScript 才能生成商品内容、要求特定地区/会话，或主动禁止自动读取的页面仍可能失败；失败时会在对应商品卡和采集提醒中说明 HTTP 状态、域名解析、验证码、页面内容或服务配置等原因。工作台读取用户提供的链接，不自动搜索商品。
+接受任意平台的公开 `http://` 或 `https://` 商品页链接，不限制 Amazon。先尝试直连读取；直连失败时，使用当前访客自行提供的 Bright Data Web Unlocker 凭据重试。页面会保留两次尝试的状态和原因。仅支持公开网页：需要登录、验证码、JavaScript 才能生成商品内容、要求特定地区/会话，或主动禁止自动读取的页面仍可能失败；失败时会在对应商品卡和采集提醒中说明 HTTP 状态、域名解析、验证码、页面内容或服务配置等原因。工作台读取用户提供的链接，不自动搜索商品。
 
 ## AI 与采集配置
 
 每位使用者都填写自己的 OpenAI 兼容 API Key 和 Base URL。个人 Key 只保存在当前浏览器标签页的 `sessionStorage`，通过 HTTPS 请求头发送给本服务，不写入服务端设置、任务记录或日志；关闭标签页后浏览器会清除。AI API Base URL 必须使用 HTTPS。AI 调用费用由使用者自己的 API 账户承担。
 
-Bright Data Web Unlocker 是可选的公共回退采集服务，由站点管理员在 Vercel 项目环境变量配置。访问者共享该站点的采集额度。没有配置 Bright Data 时，仍会尝试直接读取允许访问的页面。
+Bright Data Web Unlocker 是可选的个人回退采集服务。每位访客在「AI 与采集设置」中填写自己的 API Key 和 Zone；凭据只保存在该访客当前浏览器标签页的 `sessionStorage`，仅随其商品采集请求通过 HTTPS 发送，不写入共享配置、任务记录或应用日志。Bright Data 用量和费用由各访客自己的账户承担。没有配置个人 Bright Data 时，仍会尝试直接读取允许访问的页面。
 
 ## 发布到 Vercel
 
@@ -34,10 +34,7 @@ Bright Data Web Unlocker 是可选的公共回退采集服务，由站点管理�
 3. 在 Vercel 项目 **Settings → Environment Variables** 中按需配置：
 
    - `OPENAI_API_BASE_URL`：可选，个人设置页默认的 API 地址；默认 `https://api.apimart.ai/v1`。
-   - `BRIGHTDATA_API_TOKEN` 与 `BRIGHTDATA_WEB_UNLOCKER_ZONE`：可选的公共网页读取回退。两项都设置后生效。
-   - `IMAGEREQ_ADMIN_TOKEN`：保留给其他部署方式使用；Vercel 上的公共采集设置由环境变量维护。
-
-4. 保存环境变量后，在 Vercel 触发一次 Redeploy。检查站点首页及 `/healthz`；在线读取商品和 AI 分析还需要访客分别提供可用链接和自己的 AI Key。
+4. 保存环境变量后，在 Vercel 触发一次 Redeploy。检查站点首页及 `/healthz`；在线读取商品和 AI 分析还需要访客分别提供可用链接、自己的 AI Key，以及可选的 Bright Data 凭据。
 
 `vercel.json` 将函数最大执行时间设为 300 秒。Vercel 账号方案会决定实际可用上限；如果方案上限更低，较慢的商品网站或 AI 服务可能超时。Vercel 的免费方案条款也可能限制商业用途，面向业务用户长期开放前应按其当前条款选择方案。
 

@@ -5,7 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <meta name="theme-color" content="#142f48">
   <title>图需工作台 | 竞品套图分析</title>
-  <link rel="stylesheet" href="/style.css?v=20261019-multiplatform">
+  <link rel="stylesheet" href="/style.css?v=20261020-user-brightdata">
 </head>
 <body>
   <header class="topbar">
@@ -44,7 +44,7 @@
         <label class="field field-wide"><span>补充要求 <small>选填</small></span><textarea id="purpose" rows="2" placeholder="例如：重点说明尺寸和安装方式，图上文案使用英文并附中文对照。"></textarea></label>
       </div>
       <div class="research-controls">
-        <div class="cost-note"><span class="info-dot">i</span><span>支持可公开访问的 HTTP(S) 商品页面。先尝试直连读取；失败时可使用已配置的 Bright Data Web Unlocker 重试。需要登录、验证码、仅由 JavaScript 渲染或禁止自动访问的页面可能无法读取，商品卡会显示失败原因。</span></div>
+        <div class="cost-note"><span class="info-dot">i</span><span>支持可公开访问的 HTTP(S) 商品页面。先尝试直连读取；失败时可使用你在个人设置中提供的 Bright Data 重试。需要登录、验证码、仅由 JavaScript 渲染或禁止自动访问的页面可能无法读取，商品卡会显示失败原因。</span></div>
         <button id="research-button" class="button button-primary" type="button"><span class="search-glyph">⌕</span> 读取商品信息与图片</button>
       </div>
       <div id="research-message" class="message" role="status" aria-live="polite"></div>
@@ -60,13 +60,11 @@
         <label class="field"><span class="model-label-line"><span>从列表选择视觉模型</span><button id="load-models" class="text-button" type="button">读取 API 模型列表</button></span><select id="relay-model-select" disabled><option value="">请先读取模型列表</option></select></label>
         <label class="field"><span>模型 ID（自动填入，也可手动输入）</span><input id="vision-model-input" type="text" autocomplete="off" placeholder="选择上方模型，或粘贴模型 ID"></label>
         <div class="service-actions"><p>API Key 只保存在当前浏览器标签页，并通过 HTTPS 随 AI 请求发送；不会写入网站设置、任务记录或日志。请使用你自己的 OpenAI 兼容服务 Key。</p><button id="save-ai-settings" class="button button-secondary" type="button">保存个人 AI 设置到此标签页</button></div>
-        <p id="vercel-collector-note" class="service-notice hidden">Bright Data 回退由站点管理员在 Vercel 项目的环境变量中配置。访客无需也无法更改公共采集额度。</p>
         <div id="collector-settings">
-          <div class="service-divider">Bright Data 回退采集</div>
-          <label class="field"><span>站点管理员密码 <small>仅管理员设置公共采集服务</small></span><input id="admin-token" type="password" autocomplete="current-password" placeholder="由站点管理员填写"></label>
-          <label class="field"><span>Bright Data Web Unlocker Zone</span><input id="brightdata-zone" type="text" autocomplete="off" placeholder="填写账户中的 Web Unlocker Zone 名称"></label>
-          <label class="field"><span>Bright Data API Token</span><input id="brightdata-api-token" type="password" autocomplete="off" placeholder="粘贴 Bright Data API Token；留空保留已加载 Token"></label>
-          <div class="service-actions"><p>商品页先尝试直连；失败时可使用站点管理员配置的 Bright Data Web Unlocker 重试任意公开网页。没有配置 Bright Data 时，仍可读取允许直连的商品页面。</p><button id="save-collector-settings" class="button button-secondary" type="button">保存采集服务设置</button></div>
+          <div class="service-divider">个人 Bright Data 回退设置（可选）</div>
+          <label class="field"><span>你的 Bright Data Web Unlocker Zone</span><input id="brightdata-zone" type="text" autocomplete="off" placeholder="例如：mcp_unlocker"></label>
+          <label class="field"><span>你的 Bright Data API Key</span><input id="brightdata-api-token" type="password" autocomplete="off" placeholder="粘贴你自己的 Bright Data API Key"></label>
+          <div class="service-actions"><p>凭据只保存在当前浏览器标签页，并仅随你的商品采集请求通过 HTTPS 发送；不会写入共享设置或采集任务记录。Bright Data 用量由你自己的账户承担。留空时仍会尝试直连。</p><button id="save-collector-settings" class="button button-secondary" type="button">保存个人 Bright Data 设置到此标签页</button></div>
         </div>
       </div>
     </details>
@@ -92,6 +90,6 @@
 
     <footer class="page-footer">商品页事实仅取页面实际返回内容，并标明直采或 Bright Data 来源。套图视觉规律由 AI 按类型归纳；建议中的画面文案与生图指令可人工修改。生图指令以吸引点击为设计目标，不代表已验证点击率。</footer>
   </main>
-  <script src="/app.js?v=20261019-multiplatform" defer></script>
+  <script src="/app.js?v=20261020-user-brightdata" defer></script>
 </body>
 </html>
