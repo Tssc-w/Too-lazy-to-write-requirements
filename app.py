@@ -597,43 +597,91 @@ def redact_secrets(value, known_key=""):
 
 
 def extract_sse_chat_content(response_body, api_key, request_id):
-    """Collect OpenAI-compatible chat completion content from SSE data events."""
+    """Collect text from OpenAI Chat Completions, Responses, or compatible SSE events."""
     pieces = []
-    for raw_line in response_body.decode("utf-8", errors="replace").lstrip("\ufeff").splitlines():
-        line = raw_line.strip()
-        if not line or line.startswith(":") or not line.startswith("data:"):
-            continue
-        event_data = line[5:].strip()
+    def append_text(value):
+        if isinstance(value, str):
+            pieces.append(value)
+        elif isinstance(value, list):
+            for part in value:
+                append_text(part)
+        elif isinstance(value, dict):
+            if isinstance(value.get("text"), str):
+                pieces.append(value["text"])
+            elif "content" in value:
+                append_text(value["content"])
+
+    def consume_event(event_data, event_name=""):
         if not event_data or event_data == "[DONE]":
-            continue
+            return
         try:
             event = json.loads(event_data)
         except json.JSONDecodeError:
-            continue
+            return
         if not isinstance(event, dict):
-            continue
+            return
         if event.get("error"):
             error = event["error"]
             if isinstance(error, dict):
                 error = error.get("message") or error.get("type") or "AI 服务返回流式错误"
             raise ValueError("AI 服务流式响应报错：" + redact_secrets(text(error, 500), api_key))
+        event_type = text(event.get("type") or event_name, 120)
         choices = event.get("choices") or []
         for choice in choices:
             if not isinstance(choice, dict):
                 continue
             delta = choice.get("delta") or choice.get("message") or {}
             content = delta.get("content") if isinstance(delta, dict) else None
-            if isinstance(content, str):
-                pieces.append(content)
-            elif isinstance(content, list):
-                pieces.extend(part.get("text", "") for part in content if isinstance(part, dict) and isinstance(part.get("text"), str))
+            if content is not None:
+                append_text(content)
             elif isinstance(choice.get("text"), str):
                 pieces.append(choice["text"])
+
+        if "output_text.delta" in event_type or event_type == "content_block_delta":
+            append_text(event.get("delta"))
+        if not pieces:
+            response = event.get("response") if isinstance(event.get("response"), dict) else {}
+            append_text(event.get("output_text") or response.get("output_text"))
+            if not pieces:
+                for output in response.get("output") or []:
+                    if not isinstance(output, dict):
+                        continue
+                    for part in output.get("content") or []:
+                        append_text(part)
+
+    event_data_lines = []
+    event_name = ""
+    for raw_line in response_body.decode("utf-8", errors="replace").lstrip("\ufeff").splitlines():
+        line = raw_line.strip()
+        if not line:
+            if event_data_lines:
+                consume_event("\n".join(event_data_lines), event_name)
+            event_data_lines = []
+            event_name = ""
+        elif line.startswith(":"):
+            continue
+        elif line.startswith("event:"):
+            event_name = line[6:].strip()
+        elif line.startswith("data:"):
+            event_data_lines.append(line[5:].strip())
+    if event_data_lines:
+        consume_event("\n".join(event_data_lines), event_name)
+
+    # Some gateways label a complete JSON response as text/event-stream.
+    # Accept that body shape if it contains a normal Chat Completions payload.
+    if not "".join(pieces).strip():
+        try:
+            complete_event = json.loads(response_body.decode("utf-8-sig"))
+        except (UnicodeDecodeError, json.JSONDecodeError):
+            complete_event = None
+        if isinstance(complete_event, dict):
+            consume_event(json.dumps(complete_event, ensure_ascii=False))
     content = "".join(pieces)
     if not content.strip():
         raise ValueError(
             "AI 服务返回了流式响应，但没有可识别的 Chat Completions 文本内容。"
-            f"请检查 API 兼容性；请求 ID：{request_id}。"
+            "程序已请求非流式响应；请确认 API Base URL 和所选模型支持 OpenAI Chat Completions 视觉输入。"
+            f"请求 ID：{request_id}。"
         )
     return content
 
@@ -746,6 +794,7 @@ def call_openai_chat(messages, max_tokens=16000, timeout=180):
     request_payload = {
         "messages": messages,
         "response_format": {"type": "json_object"}, "temperature": 0.2, "max_tokens": max_tokens,
+        "stream": False,
     }
     # Leave model unset when the user delegates model selection to the relay.
     if vision_model:
