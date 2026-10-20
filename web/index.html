@@ -1,0 +1,97 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="theme-color" content="#142f48">
+  <title>图需工作台 | 竞品套图分析</title>
+  <link rel="stylesheet" href="/style.css?v=20261019-multiplatform">
+</head>
+<body>
+  <header class="topbar">
+    <div class="brand"><span class="brand-mark">图</span><div><strong>图需工作台</strong><small>多平台商品图研究与设计交接</small></div></div>
+    <div class="topbar-right"><span class="market-badge"><i></i> 多平台网页采集</span><a href="#service">AI 设置</a></div>
+  </header>
+
+  <main class="shell">
+    <section class="intro">
+      <div>
+        <p class="eyebrow">PRODUCT IMAGE WORKFLOW</p>
+        <h1>从商品链接到可编辑的套图分类建议</h1>
+        <p class="intro-copy">读取商品页实际返回的卖点、参数和图片，分析一组竞品套图，并生成中英文图上短语与生图指令。</p>
+      </div>
+      <div class="steps" aria-label="工作流程"><span class="step current"><b>01</b> 商品链接</span><span class="step-line"></span><span class="step"><b>02</b> 套图分析</span><span class="step-line"></span><span class="step"><b>03</b> 编辑与导出</span></div>
+    </section>
+
+    <section class="panel intake-panel">
+      <div class="section-heading">
+        <div><span class="section-kicker">01 / PRODUCT SOURCES</span><h2>提交我方商品与参考链接</h2><p>可填写我方商品链接和多条参考商品链接；不填写我方链接时，只整理参考商品摘要。</p></div>
+        <span class="quiet-tag">最多 20 条参考链接</span>
+      </div>
+      <div class="intake-grid">
+        <label class="field"><span>我方商品链接 <small>选填</small></span><input id="product-url" placeholder="粘贴商品详情页链接" inputmode="url"></label>
+        <label class="field"><span>产品名称 / SKU <small>选填</small></span><input id="product-name" placeholder="用于图需表标题，可留空自动取商品页标题"></label>
+        <label class="field"><span>SKU / ASIN <small>选填</small></span><input id="sku" placeholder="例如：MR-1800-B"></label>
+        <label class="field field-wide"><span>参考商品链接 <small>每行一个，最多 20 个</small></span><textarea id="reference-urls" rows="4" placeholder="可填写 Amazon、Walmart、独立站等商品详情页链接"></textarea></label>
+      </div>
+      <div class="match-option"><label><input id="same-product" type="checkbox"><span><strong>我方商品与所选参考商品同款</strong><small>多选时仅在所选参考均与我方同款的情况下勾选；将使用页面事实，不生成无依据的差异结论。</small></span></label></div>
+      <div class="intake-grid secondary-grid">
+        <label class="field"><span>期望交付日期 <small>选填</small></span><input id="due-date" type="date"></label>
+        <label class="field"><span>提交人 / 团队 <small>选填</small></span><input id="submitter" placeholder="姓名或团队"></label>
+        <label class="field"><span>优先级</span><select id="priority"><option>中</option><option>高</option><option>低</option><option>紧急</option></select></label>
+        <label class="field"><span>图片比例 / 尺寸 <small>选填，留空默认 2000*2000</small></span><input id="image-size" type="text" placeholder="例如：1:1，2000*2000"></label>
+        <label class="field"><span>交付要求</span><input id="delivery-requirement" type="text" value="高清" placeholder="默认：高清"></label>
+        <label class="field field-wide"><span>补充要求 <small>选填</small></span><textarea id="purpose" rows="2" placeholder="例如：重点说明尺寸和安装方式，图上文案使用英文并附中文对照。"></textarea></label>
+      </div>
+      <div class="research-controls">
+        <div class="cost-note"><span class="info-dot">i</span><span>支持可公开访问的 HTTP(S) 商品页面。先尝试直连读取；失败时可使用已配置的 Bright Data Web Unlocker 重试。需要登录、验证码、仅由 JavaScript 渲染或禁止自动访问的页面可能无法读取，商品卡会显示失败原因。</span></div>
+        <button id="research-button" class="button button-primary" type="button"><span class="search-glyph">⌕</span> 读取商品信息与图片</button>
+      </div>
+      <div id="research-message" class="message" role="status" aria-live="polite"></div>
+    </section>
+
+    <details id="service" class="service-card">
+      <summary><span class="service-icon">API</span><span><strong>AI 与采集设置</strong><small id="service-status">AI API 与 Bright Data 状态加载中</small></span><span class="disclosure">⌄</span></summary>
+      <div class="service-body">
+        <div class="service-divider">个人 AI 设置（使用你自己的 API Key）</div>
+        <label class="field"><span>AI API Base URL</span><input id="api-base-url" type="url" autocomplete="url" placeholder="https://你的 AI 服务地址/v1"></label>
+        <label class="field"><span>个人 AI API Key</span><input id="openai-key" type="password" autocomplete="off" placeholder="粘贴你自己的 OpenAI 兼容 API Key"></label>
+        <label class="field model-default-option"><span>模型选择</span><span class="checkbox-field"><input id="use-provider-default" type="checkbox"><span>使用服务默认模型（请求不指定 model）</span></span></label>
+        <label class="field"><span class="model-label-line"><span>从列表选择视觉模型</span><button id="load-models" class="text-button" type="button">读取 API 模型列表</button></span><select id="relay-model-select" disabled><option value="">请先读取模型列表</option></select></label>
+        <label class="field"><span>模型 ID（自动填入，也可手动输入）</span><input id="vision-model-input" type="text" autocomplete="off" placeholder="选择上方模型，或粘贴模型 ID"></label>
+        <div class="service-actions"><p>API Key 只保存在当前浏览器标签页，并通过 HTTPS 随 AI 请求发送；不会写入网站设置、任务记录或日志。请使用你自己的 OpenAI 兼容服务 Key。</p><button id="save-ai-settings" class="button button-secondary" type="button">保存个人 AI 设置到此标签页</button></div>
+        <p id="vercel-collector-note" class="service-notice hidden">Bright Data 回退由站点管理员在 Vercel 项目的环境变量中配置。访客无需也无法更改公共采集额度。</p>
+        <div id="collector-settings">
+          <div class="service-divider">Bright Data 回退采集</div>
+          <label class="field"><span>站点管理员密码 <small>仅管理员设置公共采集服务</small></span><input id="admin-token" type="password" autocomplete="current-password" placeholder="由站点管理员填写"></label>
+          <label class="field"><span>Bright Data Web Unlocker Zone</span><input id="brightdata-zone" type="text" autocomplete="off" placeholder="填写账户中的 Web Unlocker Zone 名称"></label>
+          <label class="field"><span>Bright Data API Token</span><input id="brightdata-api-token" type="password" autocomplete="off" placeholder="粘贴 Bright Data API Token；留空保留已加载 Token"></label>
+          <div class="service-actions"><p>商品页先尝试直连；失败时可使用站点管理员配置的 Bright Data Web Unlocker 重试任意公开网页。没有配置 Bright Data 时，仍可读取允许直连的商品页面。</p><button id="save-collector-settings" class="button button-secondary" type="button">保存采集服务设置</button></div>
+        </div>
+      </div>
+    </details>
+
+    <section id="research-section" class="panel results-panel hidden">
+      <div class="section-heading results-heading"><div><span class="section-kicker">02 / SOURCE FACTS</span><h2>商品页事实与套图</h2><p>查看实际返回字段、图片链接和来源状态。可同时选择多条参考链接，让 AI 汇总相似的视觉规律。</p></div><div id="research-stats" class="stats"></div></div>
+      <div id="warnings" class="warnings hidden"></div>
+      <div id="product-list" class="product-list"></div>
+      <div class="analysis-launch"><div><strong id="selected-reference-title">尚未选择参考商品</strong><small id="selected-reference-hint">默认选中所有已返回图片的参考链接；可调整选择。单次最多联合分析 180 张图。</small></div><button id="analyze-button" class="button button-primary" type="button" disabled>联合分析所选套图</button></div>
+      <div id="analysis-message" class="message" role="status" aria-live="polite"></div>
+    </section>
+
+    <section id="analysis-section" class="panel analysis-panel hidden">
+      <div class="section-heading"><div><span class="section-kicker">03 / AI ANALYSIS</span><h2>套图共性总结、分类建议与画面文案</h2><p>产品展示图与场景图合并后总结四条共性，并给出两项类型级建议；其余出现的图片类型也各给两项建议，不展示逐张分析。</p></div><div class="analysis-actions"><button id="copy-all-prompts" class="button button-secondary" type="button">复制全部提示词</button><button id="export-button" class="button button-primary" type="button">填写模板并下载 Excel</button></div></div>
+      <div id="product-summary" class="product-summary"></div>
+      <div class="summary-block"><h3 id="summary-heading">四条产品展示/场景图共性总结</h3><div id="summary-points" class="summary-points"></div></div>
+      <div id="structure-summary" class="structure-grid"></div>
+      <div class="image-analysis-heading"><div><strong>按图片类型汇总的建议</strong><small id="analysis-count"></small><small>在每个类型下勾选要导出的方案；该类型若都不勾选，则该类型的两个方案都会导出。</small></div><span class="editable-pill">文案与指令可编辑</span></div>
+      <div id="image-groups" class="image-groups"></div>
+      <div id="export-message" class="validation-message"></div>
+      <div class="brief-footer"><span>导出保留模板原工作表，并新增「竞品分析」与「AI套图分析与生图指令」；按类型建议生成需求行。</span><span id="row-count">0 个类型建议</span></div>
+    </section>
+
+    <footer class="page-footer">商品页事实仅取页面实际返回内容，并标明直采或 Bright Data 来源。套图视觉规律由 AI 按类型归纳；建议中的画面文案与生图指令可人工修改。生图指令以吸引点击为设计目标，不代表已验证点击率。</footer>
+  </main>
+  <script src="/app.js?v=20261019-multiplatform" defer></script>
+</body>
+</html>
