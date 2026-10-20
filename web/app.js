@@ -2,6 +2,10 @@
   const state = { research: null, researchJobId: '', selectedProductIds: [], analysis: null, analysisJobId: '', busy: false, analysisBusy: false, aiApiKey: '', brightdataConfigured: false };
   const AI_SETTINGS_KEY = 'imageBriefUserAISettings';
   const BRIGHTDATA_SETTINGS_KEY = 'imageBriefUserBrightDataSettings';
+  const DRAFT_KEY = 'imageBriefDraft.v2';
+  const FORM_IDS = ['product-url', 'product-name', 'sku', 'reference-urls', 'due-date', 'submitter', 'priority', 'image-size', 'delivery-requirement', 'purpose', 'same-product'];
+  let analysisResume = { signature: '', batches: {} };
+  let saveTimer;
   const $ = (selector, root = document) => root.querySelector(selector);
   const STRUCTURE = [
     ['顺序与结构', 'sequence'], ['视觉风格', 'style'], ['构图', 'composition'],
@@ -10,7 +14,60 @@
   const esc = value => String(value ?? '').replace(/[&<>"']/g, ch => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[ch]));
   const redactSecrets = value => String(value ?? '').replace(/\bsk-[A-Za-z0-9_*.-]{4,}/gi, '[API Key 已隐藏]');
   const lines = value => String(value || '').split(/\r?\n/).map(line => line.trim()).filter(Boolean);
-  const jsonFetch = (url, options = {}) => fetch(url, { ...options, headers: { 'Content-Type': 'application/json', ...(options.headers || {}) } });
+  const jsonFetch = async (url, options = {}) => {
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), 210000);
+    try {
+      if (options.body && new Blob([options.body]).size > 3 * 1024 * 1024) throw new Error('本次内容超过 3 MB，请减少图片或链接后重试。');
+      const response = await fetch(url, { ...options, signal: controller.signal, cache: 'no-store', headers: { 'Content-Type': 'application/json', ...(options.headers || {}) } });
+      if (url === '/api/export' && response.ok) return response;
+      const raw = await response.text();
+      let result;
+      try { result = JSON.parse(raw); } catch (_) {
+        const errors = { 413: '内容过大，请减少图片或链接。', 429: '服务繁忙，请稍后继续。', 502: '上游服务暂时不可用，请稍后继续。', 504: '本批请求超时，已完成批次保留；请稍后继续。' };
+        throw new Error(errors[response.status] || `服务返回非 JSON 响应（HTTP ${response.status}），请稍后继续。`);
+      }
+      if (!response.ok) {
+        const error = new Error((result.error || `请求失败（HTTP ${response.status}）`) + (result.request_id ? ` [编号 ${result.request_id.slice(0, 12)}]` : ''));
+        error.status = response.status;
+        throw error;
+      }
+      response.json = async () => result;
+      return response;
+    } catch (error) {
+      if (error.name === 'AbortError') throw new Error('本批等待超时，已完成批次保留；请稍后点击继续。');
+      if (error instanceof TypeError) throw new Error('网络连接中断，已完成批次保留；恢复网络后请点击继续。');
+      throw error;
+    } finally { clearTimeout(timer); }
+  };
+
+  function saveDraft() {
+    clearTimeout(saveTimer);
+    const form = Object.fromEntries(FORM_IDS.map(id => [id, $('#' + id).type === 'checkbox' ? $('#' + id).checked : $('#' + id).value]));
+    // Whitelist business fields only. Personal keys never enter this draft.
+    try {
+      sessionStorage.setItem(DRAFT_KEY, JSON.stringify({ version: 2, savedAt: Date.now(), form, research: state.research, researchJobId: state.researchJobId, selectedProductIds: state.selectedProductIds, analysis: state.analysis, analysisResume }));
+    } catch (_) {
+      message('#analysis-message', '浏览器暂时无法保存恢复进度，请保持页面打开；当前结果仍可编辑和导出。', 'error');
+    }
+  }
+  function scheduleSave() { clearTimeout(saveTimer); saveTimer = setTimeout(saveDraft, 250); }
+  function restoreDraft() {
+    try {
+      const draft = JSON.parse(sessionStorage.getItem(DRAFT_KEY) || 'null');
+      if (!draft || draft.version !== 2 || Date.now() - draft.savedAt > 24 * 60 * 60 * 1000) return;
+      for (const id of FORM_IDS) if (draft.form && Object.hasOwn(draft.form, id)) {
+        if ($('#' + id).type === 'checkbox') $('#' + id).checked = Boolean(draft.form[id]);
+        else $('#' + id).value = draft.form[id];
+      }
+      state.research = draft.research; state.researchJobId = draft.researchJobId;
+      state.selectedProductIds = draft.selectedProductIds || []; state.analysis = draft.analysis;
+      analysisResume = draft.analysisResume || { signature: '', batches: {} };
+      if (state.research) { $('#research-section').classList.remove('hidden'); renderResearch(); }
+      if (state.analysis) { renderAnalysis(); $('#analysis-section').classList.remove('hidden'); }
+      if (state.research) message('#research-message', '已恢复当前标签页的商品、分析和编辑进度。再次读取会重试失败链接；再次分析会复用已完成批次。', 'success');
+    } catch (_) { /* A damaged or older draft must not prevent startup. */ }
+  }
 
   function message(selector, text, kind = '') {
     const node = $(selector);
@@ -28,7 +85,7 @@
 
   async function loadConfig() {
     try {
-      const response = await fetch('/api/config', { cache: 'no-store' });
+      const response = await jsonFetch('/api/config');
       const config = await response.json();
       loadAISettings(config.api_base_url);
       loadBrightDataSettings();
@@ -124,7 +181,7 @@
     let job = initial;
     while (!job.done) {
       await new Promise(resolve => setTimeout(resolve, 1500));
-      const response = await fetch(`/api/jobs/${encodeURIComponent(job.job_id)}`, { cache: 'no-store' });
+      const response = await jsonFetch(`/api/jobs/${encodeURIComponent(job.job_id)}`);
       job = await response.json();
       if (!response.ok) throw new Error(job.error || '任务状态查询失败');
       if (!job.done) message(messageSelector, `${job.status}。${job.progress || ''}`);
@@ -148,7 +205,11 @@
     if (payload.reference_urls.length > 20) {
       message('#research-message', '参考商品链接最多支持 20 条。', 'error'); return;
     }
-    state.busy = true; state.research = null; state.analysis = null; state.selectedProductIds = [];
+    if (state.busy) return;
+    const previousItems = state.research?.items || [];
+    state.busy = true; state.analysis = null; state.selectedProductIds = [];
+    state.research = { product_name: payload.product_name, sku: payload.sku, items: [], warnings: [], searched_at: new Date().toISOString() };
+    state.researchJobId = 'browser-resumable';
     $('#research-section').classList.remove('hidden'); $('#analysis-section').classList.add('hidden');
     $('#product-list').innerHTML = '<div class="empty-state">正在读取商品网页；直连失败时会尝试使用你自己的 Bright Data（如已填写）…</div>';
     $('#warnings').classList.add('hidden'); $('#analyze-button').disabled = true;
@@ -156,20 +217,41 @@
     message('#research-message', '开始读取商品链接；直连失败的链接会尝试使用你提供的 Bright Data（如已填写）。');
     $('#research-section').scrollIntoView({ behavior: 'smooth', block: 'start' });
     try {
-      const response = await jsonFetch('/api/research', { method: 'POST', body: JSON.stringify(payload) });
-      const initial = await response.json();
-      if (!response.ok) throw new Error(initial.error || '无法开始采集');
-      const job = await pollJob(initial);
-      if (!job.result) throw new Error(job.error || '采集任务没有返回结果');
-      state.research = job.result; state.researchJobId = job.job_id;
+      const links = [...(payload.product_url ? [{ url: payload.product_url, role: '我方商品' }] : []), ...payload.reference_urls.map(url => ({ url, role: url === payload.product_url ? '我方商品 / 指定参考' : '指定参考' }))];
+      const unique = [...new Map(links.map(link => [link.url, link])).values()];
+      let next = 0, completed = 0;
+      const items = new Array(unique.length);
+      async function worker() {
+        while (next < unique.length) {
+          const index = next++, link = unique[index];
+          const existing = previousItems.find(item => item.url === link.url && item.fetch_method !== 'failed' && item.image_urls?.length);
+          try {
+            if (existing) items[index] = { ...existing, role: link.role };
+            else {
+              const response = await jsonFetch('/api/research/link', { method: 'POST', body: JSON.stringify({ ...link, brightdata_api_token: brightdataApiToken, brightdata_zone: brightdataZone }) });
+              items[index] = (await response.json()).item;
+              items[index].role = link.role;
+            }
+          } catch (error) {
+            items[index] = { ...link, product_id: link.url, title: '', image_urls: [], fetch_method: 'failed', status: error.message };
+          }
+          completed++;
+          state.research.items = items.filter(Boolean);
+          state.research.warnings = state.research.items.filter(item => item.fetch_method === 'failed').map(item => ({ source: item.url, message: item.status }));
+          saveDraft(); renderResearch();
+          message('#research-message', `已处理 ${completed}/${unique.length} 条链接，成功结果已保存；失败链接可稍后重试。`);
+        }
+      }
+      await Promise.all([worker(), worker()]);
       if (!state.research.product_name) state.research.product_name = payload.product_name;
+      if (!state.research.product_name) state.research.product_name = state.research.items.find(item => item.title)?.title || '';
       state.selectedProductIds = (state.research.items || []).filter(item => item.role !== '我方商品' && item.image_urls?.length).map(item => item.product_id || item.asin || item.url).filter(Boolean);
       renderResearch();
-      const items = state.research.items || [];
-      const directCount = items.filter(item => item.fetch_method === 'direct').length;
-      const brightdataCount = items.filter(item => item.fetch_method === 'brightdata').length;
+      const collectedItems = state.research.items || [];
+      const directCount = collectedItems.filter(item => item.fetch_method === 'direct').length;
+      const brightdataCount = collectedItems.filter(item => item.fetch_method === 'brightdata').length;
       const hasFacts = item => Boolean(item.title || item.brand || item.price || item.features?.length || item.description || item.specifications?.length || item.image_urls?.length);
-      const count = items.filter(hasFacts).length;
+      const count = collectedItems.filter(hasFacts).length;
       const unread = [];
       const unreadSources = new Set();
       for (const warning of (state.research.warnings || [])) {
@@ -177,7 +259,7 @@
         unread.push(`${source}\n原因：${warning.message || '未返回可读取内容'}`);
         unreadSources.add(source);
       }
-      for (const item of items.filter(row => !hasFacts(row))) {
+      for (const item of collectedItems.filter(row => !hasFacts(row))) {
         const source = item.url || item.asin || '未识别的链接';
         if (unreadSources.has(source)) continue;
         unread.push(`${source}\n原因：${item.status || '页面未返回可确认的商品字段'}`);
@@ -189,6 +271,7 @@
       $('#product-list').innerHTML = '<div class="empty-state">商品读取未完成。请查看提示并确认商品页当前可从本机访问。</div>';
       message('#research-message', error.message, 'error');
     } finally {
+      saveDraft();
       state.busy = false; $('#research-button').disabled = false; $('#research-button').innerHTML = '<span class="search-glyph">⌕</span> 读取商品信息与图片';
       updateSelectedReference();
     }
@@ -243,7 +326,7 @@
     const selected = (state.research?.items || []).filter(item => state.selectedProductIds.includes(item.product_id || item.asin || item.url));
     const imageCount = selected.reduce((sum, item) => sum + Math.min(item.image_urls?.length || 0, 30), 0);
     const button = $('#analyze-button');
-    const disabled = !selected.length || imageCount > 180 || state.analysisBusy;
+    const disabled = !selected.length || imageCount > 180 || state.analysisBusy || state.busy;
     button.disabled = disabled;
     $('#selected-reference-title').textContent = selected.length ? `已选择 ${selected.length} 条参考链接` : '尚未选择参考商品';
     $('#selected-reference-hint').textContent = state.analysisBusy
@@ -255,28 +338,62 @@
   }
 
   async function startAnalysis() {
-    if (!state.selectedProductIds.length || !state.researchJobId || state.analysisBusy) return;
+    if (!state.selectedProductIds.length || !state.researchJobId || state.busy) return;
     if (!state.aiApiKey) { message('#analysis-message', '请先在 AI 设置中填写并保存你自己的 API Key。', 'error'); return; }
     state.analysisBusy = true;
     state.busy = true; $('#analyze-button').disabled = true; $('#analyze-button').textContent = 'AI 分析中…';
-    $('#analysis-section').classList.add('hidden');
-    message('#analysis-message', '正在将图片按每批 10 张并行分析；遇到不支持的图片时会拆分批次并跳过问题图片。');
+    $('#research-button').disabled = true;
+    message('#analysis-message', '正在每批识别 4 张图片，完成即保存；出错后可点击继续，已完成批次无需重跑。');
     const productUrl = $('#product-url').value.trim();
     const productAsin = asinFromUrl(productUrl);
     const ourItem = (state.research?.items || []).find(item => String(item.role || '').startsWith('我方商品'));
     const productId = ourItem?.product_id || (productAsin ? `amazon:${productAsin}` : '');
     const sameProduct = $('#same-product').checked || Boolean(state.selectedProductIds.length === 1 && productId && productId === state.selectedProductIds[0]);
     try {
-      const response = await jsonFetch('/api/analyze', { method: 'POST', headers: { 'X-User-AI-Key': state.aiApiKey }, body: JSON.stringify({
-        research_job_id: state.researchJobId, research_result: state.research, selected_product_ids: state.selectedProductIds,
-        our_product_id: productId, our_asin: productAsin, same_product: sameProduct, purpose: $('#purpose').value.trim(),
-        ...aiSettingsPayload(),
-      }) });
-      const initial = await response.json();
-      if (!response.ok) throw new Error(initial.error || '无法启动 AI 分析');
-      const job = await pollJob(initial, '#analysis-message');
-      if (!job.result) throw new Error(job.error || 'AI 没有返回分析内容');
-      state.analysis = job.result;
+      const references = state.selectedProductIds.map(id => (state.research.items || []).find(item => (item.product_id || item.asin || item.url) === id)).filter(Boolean);
+      const ourProduct = sameProduct ? references.find(item => item.product_id === productId) || references[0] : ourItem || null;
+      const settings = aiSettingsPayload();
+      const purpose = $('#purpose').value.trim();
+      const signature = JSON.stringify({ version: 1, references, ourProduct, sameProduct, settings, purpose });
+      if (analysisResume.signature !== signature) analysisResume = { signature, batches: {} };
+      const batches = references.flatMap((reference, referenceIndex) => {
+        const tasks = [];
+        for (let start = 0; start < Math.min(30, reference.image_urls.length); start += 4) tasks.push({ referenceIndex, start, reference: { ...reference, image_urls: reference.image_urls.slice(start, start + 4) }, id: `${referenceIndex}:${start}` });
+        return tasks;
+      });
+      const pending = batches.filter(batch => !analysisResume.batches[batch.id]);
+      let cursor = 0, halt = false;
+      const failures = [];
+      const common = { our_product: ourProduct, same_product: sameProduct, purpose, ...settings };
+      const headers = { 'X-User-AI-Key': state.aiApiKey };
+      async function worker() {
+        while (!halt && cursor < pending.length) {
+          const batch = pending[cursor++];
+          try {
+            const response = await jsonFetch('/api/analyze/batch', { method: 'POST', headers, body: JSON.stringify({ ...common, reference: batch.reference, source_image_start: batch.start + 1 }) });
+            const result = (await response.json()).result;
+            if (!result || !Array.isArray(result.images)) throw new Error('本批未返回有效识别结果，请继续重试。');
+            analysisResume.batches[batch.id] = result;
+            saveDraft();
+            message('#analysis-message', `已保存 ${batches.filter(item => analysisResume.batches[item.id]).length}/${batches.length} 批图片识别，刷新后也可继续。`);
+          } catch (error) {
+            failures.push(`参考 ${batch.referenceIndex + 1} 第 ${batch.start + 1} 张起：${error.message}`);
+            if (error.status === 429 || /401|403|Key|模型|model|API 地址/i.test(error.message)) halt = true;
+          }
+        }
+      }
+      await Promise.all([worker(), worker()]);
+      if (failures.length) throw new Error(`${failures.slice(0, 2).join('\n')}\n已保留成功批次；检查设置或稍后点击“继续分析未完成批次”。`);
+      const analyses = references.map((reference, referenceIndex) => {
+        const results = batches.filter(batch => batch.referenceIndex === referenceIndex).map(batch => analysisResume.batches[batch.id]);
+        return { images: results.flatMap(result => result.images || []), core_benefits: [...new Set(results.flatMap(result => result.core_benefits || []))], warnings: results.flatMap(result => result.warnings || []) };
+      });
+      if (!analyses.some(result => result.images.length)) throw new Error('所有图片都被上游拒绝，请更换图片或视觉模型。');
+      message('#analysis-message', '图片批次已保存，正在汇总四条共性和类型建议；汇总失败可单独重试。');
+      const response = await jsonFetch('/api/analyze/summary', { method: 'POST', headers, body: JSON.stringify({ ...common, references, analyses }) });
+      state.analysis = (await response.json()).result;
+      state.analysis.image_warnings = analyses.flatMap(result => result.warnings);
+      saveDraft();
       renderAnalysis();
       $('#analysis-section').classList.remove('hidden');
       $('#analysis-section').scrollIntoView({ behavior: 'smooth', block: 'start' });
@@ -286,7 +403,7 @@
         : '';
       message('#analysis-message', `套图归纳完成：${state.analysis.reference_products?.length || 1} 条链接、${state.analysis.image_count || 0} 张图片已形成四条共性总结和 ${state.analysis.image_groups?.length || 0} 类建议（含产品展示/场景图）。${warningDetails}`, imageWarnings.length ? '' : 'success');
     } catch (error) { message('#analysis-message', error.message, 'error'); }
-    finally { state.busy = false; state.analysisBusy = false; $('#analyze-button').textContent = '联合分析所选套图'; updateSelectedReference(); }
+    finally { state.busy = false; state.analysisBusy = false; $('#research-button').disabled = false; $('#analyze-button').textContent = state.analysis ? '联合分析所选套图' : '继续分析未完成批次'; saveDraft(); updateSelectedReference(); }
   }
 
   function renderAnalysis() {
@@ -495,6 +612,9 @@
     catch (error) { message('#analysis-message', error.message, 'error'); }
   });
   $('#same-product').addEventListener('change', updateSelectedReference);
+  document.addEventListener('input', scheduleSave);
+  document.addEventListener('change', scheduleSave);
+  window.addEventListener('pagehide', saveDraft);
   document.addEventListener('error', event => {
     const image = event.target;
     if (!(image instanceof HTMLImageElement)) return;
@@ -513,5 +633,6 @@
       container.appendChild(note);
     }
   }, true);
+  restoreDraft();
   loadConfig();
 })();

@@ -25,6 +25,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from io import BytesIO
 from pathlib import Path
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from reliability import RequestError, admission, deadline, read_limited, remaining
 
 from openpyxl import load_workbook
 from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
@@ -42,7 +43,9 @@ OPENAI_VISION_MODEL = os.environ.get("OPENAI_VISION_MODEL", "").strip()
 OPENAI_VISION_DETAIL = os.environ.get("OPENAI_VISION_DETAIL", "low").strip().lower()
 if OPENAI_VISION_DETAIL not in {"low", "high", "auto"}:
     OPENAI_VISION_DETAIL = "low"
-MAX_BODY_BYTES = 12 * 1024 * 1024
+MAX_BODY_BYTES = 3 * 1024 * 1024
+BUILD_VERSION = "20261020-resumable-v1"
+STEP_IMAGE_LIMIT = 4
 MAX_REFERENCE_LINKS = 20
 MAX_IMAGES_PER_PRODUCT = 30
 MAX_IMAGES_PER_ANALYSIS = 180
@@ -179,6 +182,20 @@ class _PublicHTTPSHandler(urllib.request.HTTPSHandler):
         # `_check_hostname` is a private attribute not set by every supported
         # Python runtime. The SSLContext already carries hostname verification.
         return self.do_open(_PublicHTTPSConnection, request, context=self._context)
+
+
+class _CredentialRedirectHandler(urllib.request.HTTPRedirectHandler):
+    def redirect_request(self, request, fp, code, message, headers, new_url):
+        raise RequestError('API 地址返回重定向，已阻止转发密钥。请填写服务商的最终 HTTPS API 地址。', 502, 'API_REDIRECT')
+
+
+def credential_open(request, timeout=75):
+    url = _public_http_url(request.full_url)
+    parsed = urllib.parse.urlsplit(url)
+    if parsed.scheme != 'https' or parsed.port not in (None, 443, 8443):
+        raise ValueError('API 地址必须使用公网 HTTPS，端口仅支持 443 或 8443。')
+    opener = urllib.request.build_opener(urllib.request.ProxyHandler({}), _CredentialRedirectHandler(), _PublicHTTPHandler(), _PublicHTTPSHandler())
+    return opener.open(request, timeout=remaining(timeout))
 
 
 def image_urls(value, base_url=""):
@@ -344,9 +361,9 @@ def _fetch_product_direct(url, role):
     })
     opener = urllib.request.build_opener(urllib.request.ProxyHandler({}), _PublicRedirectHandler(), _PublicHTTPHandler(), _PublicHTTPSHandler())
     try:
-        with opener.open(request, timeout=28) as response:
+        with opener.open(request, timeout=remaining(25)) as response:
             final_url = _public_http_url(response.geturl())
-            raw = response.read(6 * 1024 * 1024 + 1)
+            raw = read_limited(response, 6 * 1024 * 1024)
             if len(raw) > 6 * 1024 * 1024:
                 raise ValueError("商品页超过 6 MB，已停止读取。")
             source = raw.decode(response.headers.get_content_charset() or "utf-8", errors="replace")
@@ -391,6 +408,9 @@ def parse_product_html(url, role, source, source_method):
     url = safe_url(url)
     asin = amazon_asin(url) if url else ""
     visible_text = _clean_html_text(re.sub(r"<[^>]+>", " ", source))[:8000]
+    page_title = _clean_html_text(_html_section(source, r"<title[^>]*>(.*?)</title>"))
+    if re.search(r"access denied|request blocked|just a moment|attention required|security check|service unavailable|访问被拒绝|접근.{0,5}차단", page_title, re.I):
+        raise ValueError('网页返回访问限制或验证页面，未取得商品详情。')
     if "global adaptive rate limit" in visible_text.lower():
         raise ValueError("Bright Data 返回全局速率限制，请稍后重试。")
     if "robot check" in visible_text.lower() or "validatecaptcha" in source.lower() or "enter the characters you see below" in visible_text.lower() or "captcha" in visible_text.lower()[:1200]:
@@ -469,7 +489,7 @@ def parse_product_html(url, role, source, source_method):
         "images": imgs,
     }
     field_status = {key: ("已返回" if value else "未返回") for key, value in facts.items()}
-    if not (title or imgs or features or description or specs):
+    if not (imgs or features or specs or schema_products or (title and len(description) >= 40)):
         raise ValueError("网页已打开，但没有解析到商品标题、描述或图片。该页面可能不是商品页、需要 JavaScript 渲染、需要登录，或限制自动读取。")
     host = (urllib.parse.urlsplit(url).hostname or "未知网站").lower()
     return {
@@ -565,10 +585,10 @@ def fetch_brightdata_product(url, role, api_token, zone):
     response_status = None
     for attempt in range(2):
         try:
-            with urllib.request.urlopen(request, timeout=90) as response:
+            with credential_open(request, timeout=40) as response:
                 response_status = response.status
                 response_headers = response.headers
-                response_body = response.read(6 * 1024 * 1024 + 1)
+                response_body = read_limited(response, 6 * 1024 * 1024)
             if b"global adaptive rate limit" in response_body.lower() and attempt == 0:
                 time.sleep(3)
                 continue
@@ -622,12 +642,15 @@ def normalize_ai_api_base_url(value):
         base_url = DEFAULT_AI_API_BASE_URL
     try:
         parsed = urllib.parse.urlsplit(base_url)
-        if parsed.scheme not in ("http", "https") or not parsed.hostname or parsed.username or parsed.password:
+        if parsed.scheme != "https" or not parsed.hostname or parsed.username or parsed.password:
             raise ValueError
         if parsed.query or parsed.fragment:
             raise ValueError
     except ValueError:
         raise ValueError("AI API Base URL 无效。请填写 http(s):// 开头的地址，不要在地址中附带 Key 或查询参数。") from None
+    _public_http_url(base_url)
+    if parsed.port not in (None, 443, 8443):
+        raise ValueError('AI API 端口仅支持 443 或 8443。')
     path = parsed.path.rstrip("/")
     if path.lower().endswith("/chat/completions"):
         endpoint = base_url
@@ -648,8 +671,8 @@ def fetch_relay_models():
         "Authorization": "Bearer " + api_key, "Accept": "application/json",
     })
     try:
-        with urllib.request.urlopen(request, timeout=20) as response:
-            payload = json.loads(response.read(2 * 1024 * 1024).decode("utf-8"))
+        with credential_open(request, timeout=20) as response:
+            payload = json.loads(read_limited(response, 2 * 1024 * 1024).decode("utf-8"))
     except urllib.error.HTTPError as exc:
         raise ValueError(f"AI 模型列表请求返回 HTTP {exc.code}。请确认此 Key 可查询模型列表。") from None
     except (urllib.error.URLError, TimeoutError, OSError, json.JSONDecodeError) as exc:
@@ -886,12 +909,12 @@ def call_openai_chat(messages, max_tokens=16000, timeout=180):
     request = urllib.request.Request(api_endpoint, data=body, method="POST", headers={
         "Authorization": "Bearer " + api_key, "Content-Type": "application/json", "Accept": "application/json",
     })
-    for attempt in range(3):
+    for attempt in range(2):
         try:
-            with urllib.request.urlopen(request, timeout=timeout) as response:
+            with credential_open(request, timeout=min(timeout, 75)) as response:
                 response_status = response.status
                 response_headers = response.headers
-                response_body = response.read()
+                response_body = read_limited(response, 2 * 1024 * 1024)
             content_type = response_headers.get("Content-Type", "未提供")
             request_id = next((response_headers.get(name) for name in ("x-request-id", "request-id", "x-correlation-id", "cf-ray") if response_headers.get(name)), "未提供")
             response_content = None
@@ -913,6 +936,11 @@ def call_openai_chat(messages, max_tokens=16000, timeout=180):
             if exc.code == 401:
                 # The upstream response may echo a partially masked key; never show it.
                 raise ValueError(f"AI API 返回 HTTP 401：API Key 无效、已撤销，或服务商不接受此 Key。请核对 Key 和 API 地址。Content-Type：{content_type}；请求 ID：{request_id}。") from None
+            if exc.code in (429, 502, 503, 504) and attempt == 0:
+                remaining(10)
+                retry_after = text(exc.headers.get('Retry-After') if exc.headers else '', 20)
+                time.sleep(min(5, max(1, int(retry_after))) if retry_after.isdigit() else 2)
+                continue
             try:
                 parsed = json.loads(detail)
                 if isinstance(parsed, dict):
@@ -927,11 +955,11 @@ def call_openai_chat(messages, max_tokens=16000, timeout=180):
             detail = redact_secrets(detail, api_key)
             raise ValueError(f"AI API 返回 HTTP {exc.code}：{detail}（Content-Type：{content_type}；请求 ID：{request_id}）") from None
         except (http.client.IncompleteRead, http.client.RemoteDisconnected) as exc:
-            if attempt < 2:
+            if attempt < 1:
                 time.sleep(attempt + 1)
                 continue
             raise AIResponseInterruptedError(
-                f"AI 服务响应传输中断，连续重试 3 次仍未读完整（{text(exc, 300)}）。"
+                f"AI 服务响应传输中断，已重试仍未读完整（{text(exc, 300)}）；可继续本批。"
             ) from None
         except (urllib.error.URLError, TimeoutError, OSError) as exc:
             reason = getattr(exc, "reason", exc)
@@ -940,11 +968,11 @@ def call_openai_chat(messages, max_tokens=16000, timeout=180):
                 or "UNEXPECTED_EOF_WHILE_READING" in str(reason)
             )
             if is_tls_eof:
-                if attempt < 2:
+                if attempt < 1:
                     time.sleep(attempt + 1)
                     continue
                 raise AIResponseInterruptedError(
-                    "AI 服务 TLS 连接提前关闭，连续重试 3 次仍失败。"
+                    "AI 服务 TLS 连接提前关闭，已重试仍失败；已完成批次不受影响。"
                 ) from None
             raise ValueError("AI API 连接失败或超时：" + text(reason, 800)) from None
     if response_content is None:
@@ -1021,6 +1049,7 @@ def call_openai_vision(references, our_product, same_product, user_requirements=
         result["core_benefits"] = [part.strip() for part in re.split(r"[;；\n]", result["core_benefits"]) if part.strip()]
     elif not isinstance(result.get("core_benefits"), list):
         result["core_benefits"] = []
+    result['core_benefits'] = [text(value, 500) for value in result['core_benefits'][:20] if text(value, 500)]
     has_our_facts = bool(our_facts.get("title") or our_facts.get("features") or our_facts.get("description") or our_facts.get("specifications"))
     result["reference_products"] = [{key: reference.get(key) for key in ("title", "asin", "url", "image_url", "brand", "price")} for reference in references]
     result["reference_product"] = result["reference_products"][0]
@@ -1028,8 +1057,23 @@ def call_openai_vision(references, our_product, same_product, user_requirements=
     result["same_product"] = bool(same_product)
     result["model"] = get_ai_config()[2] or "服务默认模型"
     result["images"] = []
-    generated = {int(row.get("index", 0)): row for row in result.get("image_analyses", []) if isinstance(row, dict)}
     allowed_types = {"促销主图", "效果展示图", "产品展示/场景图", "卖点图", "色卡/变体图", "细节特写图", "教程/步骤图", "信任背书图", "对比图", "规格参数图"}
+    rows = result.get('image_analyses')
+    if not isinstance(rows, list) or len(rows) != len(images_payload):
+        raise ValueError('AI 未完整识别本批图片，已保留其他批次；请继续以重试本批。')
+    generated = {}
+    for row in rows:
+        if not isinstance(row, dict) or isinstance(row.get('index'), bool):
+            raise ValueError('AI 图片记录格式不正确，请重试本批。')
+        try:
+            index = int(str(row.get('index', '')))
+        except (TypeError, ValueError):
+            raise ValueError('AI 返回无效图片序号，请重试本批。') from None
+        if index in generated or index < 1 or index > len(images_payload):
+            raise ValueError('AI 返回重复或超出范围的图片序号，请重试本批。')
+        if row.get('type') not in allowed_types | {'产品展示图', '场景图'} or not isinstance(row.get('visual_observation'), str) or not row['visual_observation'].strip():
+            raise ValueError('AI 未返回可靠的图片类型及观察，请重试本批。')
+        generated[index] = row
     for item in images_payload:
         row = generated.get(item["index"], {})
         image_type = text(row.get("type"), 100)
@@ -1042,7 +1086,7 @@ def call_openai_vision(references, our_product, same_product, user_requirements=
             "index": item["index"], "source_image_index": item["source_image_index"],
             "reference_index": item["reference_index"], "reference_title": item["title"],
             "image_url": item["url"],
-            "type": image_type, "visual_observation": row.get("visual_observation", ""),
+            "type": image_type, "visual_observation": text(row.get("visual_observation"), 1000),
             "recognized_texts": recognized_texts,
             "source_url": item["source_url"], "asin": item["asin"],
         })
@@ -1211,16 +1255,20 @@ def summarize_reference_analyses(references, analyses, our_product, same_product
         {"role": "user", "content": "请从已汇总的多张商品图中提取重复出现的共性，输出四条套图总结，并为每个出现的图片类型（包括产品展示/场景图合并类别）各给两项不同的类型级方案；不要逐张分析。\n" + json.dumps(context, ensure_ascii=False)},
     ], max_tokens=8000, timeout=180)
     result["summary_points"] = [text(point, 300) for point in result.get("summary_points", []) if text(point)] if isinstance(result.get("summary_points"), list) else []
+    if len(result['summary_points']) < 4 or not isinstance(result.get('image_groups'), list) or not result['image_groups']:
+        raise ValueError('AI 汇总缺少四条共性或分类建议；图片识别结果已保留，点击继续可只重试汇总。')
     result["summary_points"] = result["summary_points"][:4]
     while len(result["summary_points"]) < 4:
         result["summary_points"].append(f"第 {len(result['summary_points']) + 1} 条共性结论未能可靠生成，请重新分析或人工补充。")
-    result["core_benefits"] = result.get("core_benefits") if isinstance(result.get("core_benefits"), list) else []
+    result["core_benefits"] = [text(value, 500) for value in result['core_benefits'][:20] if text(value, 500)] if isinstance(result.get('core_benefits'), list) else []
     has_our_facts = bool(our_product and any(our_product.get(key) for key in ("title", "features", "description", "specifications")))
     generated_groups = {normalized_type(group.get("type")): group for group in result.get("image_groups", []) if isinstance(group, dict)} if isinstance(result.get("image_groups"), list) else {}
     result["image_groups"] = []
     for visual_group in suggestion_groups:
         generated_group = generated_groups.get(visual_group["type"], {})
         suggestions = generated_group.get("suggestions", []) if isinstance(generated_group.get("suggestions"), list) else []
+        if len({text(suggestion.get('direction'), 700).casefold() for suggestion in suggestions if isinstance(suggestion, dict) and text(suggestion.get('direction'), 700)}) < 2:
+            raise ValueError(f"AI 的{visual_group['type']}建议不完整；图片识别已保留，请继续以重试汇总。")
         normalized_suggestions = []
         seen_directions = set()
         for suggestion in suggestions:
@@ -1261,6 +1309,10 @@ def summarize_reference_analyses(references, analyses, our_product, same_product
     result["reference_product"] = result["reference_products"][0] if result["reference_products"] else {}
     result["our_product"] = {key: our_product.get(key) for key in ("title", "asin", "url", "brand", "price")} if has_our_facts else None
     result["same_product"] = bool(same_product)
+    structure = result.get('overall_structure')
+    result['overall_structure'] = {key: text(structure.get(key), 1500) for key in ('sequence', 'style', 'composition', 'color', 'material_presentation', 'copy_strategy')} if isinstance(structure, dict) else {}
+    for key in ('product_summary_zh', 'differentiation_zh', 'source_basis_zh'):
+        result[key] = text(result.get(key), 3000)
     return result
 
 
@@ -1629,6 +1681,10 @@ def export_workbook(payload):
     analysis = payload.get("analysis") or {}
     if not isinstance(rows, list) or (not rows and not analysis):
         raise ValueError("请先完成套图分析，或至少生成一条图片需求明细。")
+    if len(rows) > 200 or any(not isinstance(row, dict) for row in rows):
+        raise ValueError('导出明细必须为对象列表，最多 200 行。')
+    if not isinstance(analysis, dict) or not isinstance(payload.get('product') or {}, dict) or not isinstance(payload.get('research') or {}, dict):
+        raise ValueError('导出内容格式无效，请刷新后重试。')
     research = payload.get("research") or {}
     product = payload.get("product") or {}
     if not text(product.get("name") or research.get("product_name")):
@@ -1708,11 +1764,127 @@ def export_workbook(payload):
     return data
 
 
+def normalize_reference(value, maximum_images=30):
+    if not isinstance(value, dict):
+        raise ValueError('商品信息格式不正确，请重新读取商品。')
+    images = value.get('image_urls') or []
+    if not isinstance(images, list) or len(images) > maximum_images or any(not isinstance(url, str) or not safe_url(url) for url in images):
+        raise ValueError('图片链接数量或格式无效，请减少图片后重试。')
+    if not safe_url(value.get('url')):
+        raise ValueError('商品来源链接无效，请重新采集商品。')
+    result = {key: text(value.get(key), limit) for key, limit in (
+        ('title', 500), ('asin', 30), ('brand', 200), ('price', 100), ('description', 5000),
+        ('product_id', 100), ('role', 40), ('platform', 200), ('currency', 20))}
+    result['url'] = safe_url(value.get('url'))
+    result['image_urls'] = image_urls(images)
+    result['image_url'] = result['image_urls'][0] if images else ''
+    result['features'] = [text(item, 800) for item in (value.get('features') or [])[:20]] if isinstance(value.get('features'), list) else []
+    specs = value.get('specifications')
+    result['specifications'] = [{'name': text(row.get('name'), 160), 'value': text(row.get('value'), 500)} for row in specs[:40] if isinstance(row, dict)] if isinstance(specs, list) else []
+    return result
+
+
+def research_link(payload):
+    url = _public_http_url(payload.get('url'))
+    role = '我方商品' if payload.get('role') == '我方商品' else '指定参考'
+    api_token = text(payload.get('brightdata_api_token'), 1000)
+    zone = text(payload.get('brightdata_zone'), 200)
+    if bool(api_token) != bool(zone) or any(ord(char) < 32 for char in api_token + zone):
+        raise ValueError('请同时填写有效的个人 Bright Data API Key 和 Zone，或两项都留空。')
+    attempts = []
+    try:
+        item = fetch_product(url, role)
+        attempts.append({'method': '直采', 'status': '成功'})
+    except Exception as exc:
+        attempts.append({'method': '直采', 'status': redact_secrets(text(exc, 600), api_token)})
+        if api_token:
+            try:
+                item = fetch_brightdata_product(url, role, api_token, zone)
+                attempts.append({'method': 'Bright Data', 'status': '成功'})
+            except Exception as fallback_error:
+                attempts.append({'method': 'Bright Data', 'status': redact_secrets(text(fallback_error, 700), api_token)})
+                item = None
+        else:
+            attempts.append({'method': 'Bright Data', 'status': '未提供个人凭据，未执行回退'})
+            item = None
+    if item is None:
+        item = {'url': url, 'role': role, 'product_id': product_identity(url), 'asin': amazon_asin(url),
+                'platform': urllib.parse.urlsplit(url).hostname, 'title': '', 'image_urls': [], 'images_count': 0,
+                'fetch_method': 'failed', 'status': '；'.join(f"{attempt['method']}：{attempt['status']}" for attempt in attempts)}
+    item['source_attempts'] = attempts
+    return {'item': item}
+
+
+def analysis_step(payload, summary=False):
+    api_key = payload.pop('_request_key')
+    base_url, _ = normalize_ai_api_base_url(payload.get('api_base_url', DEFAULT_AI_API_BASE_URL))
+    model = '' if payload.get('use_provider_default') else text(payload.get('vision_model'), 200)
+    token = _request_ai_config.set((api_key, base_url, model))
+    try:
+        our = normalize_reference(payload['our_product']) if payload.get('our_product') is not None else None
+        if not summary:
+            reference = normalize_reference(payload.get('reference'), STEP_IMAGE_LIMIT)
+            if not reference['image_urls']:
+                raise ValueError('本批没有图片。')
+            for url in reference['image_urls']:
+                _public_http_url(url)
+            start = payload.get('source_image_start', 1)
+            if not isinstance(start, int) or isinstance(start, bool) or not 1 <= start <= 30 or start + len(reference['image_urls']) > 31:
+                raise ValueError('图片序号无效。')
+            result = call_openai_vision_resilient([reference], our, bool(payload.get('same_product')), text(payload.get('purpose'), 2000), start)
+            return {'result': result}
+        references, analyses = payload.get('references'), payload.get('analyses')
+        if not isinstance(references, list) or not 1 <= len(references) <= 21 or not isinstance(analyses, list) or len(references) != len(analyses):
+            raise ValueError('汇总数据不完整，请重新选择参考商品。')
+        references = [normalize_reference(value) for value in references]
+        count = 0
+        clean_analyses = []
+        for reference, analysis in zip(references, analyses):
+            if not isinstance(analysis, dict) or not isinstance(analysis.get('images'), list) or len(analysis['images']) > 30:
+                raise ValueError('图片识别结果格式无效。')
+            clean_images, seen = [], set()
+            for image in analysis['images']:
+                if not isinstance(image, dict):
+                    raise ValueError('图片识别记录格式无效。')
+                position = image.get('source_image_index')
+                if not isinstance(position, int) or isinstance(position, bool) or not 1 <= position <= len(reference['image_urls']) or position in seen:
+                    raise ValueError('图片识别序号重复或无效。')
+                if image.get('type') not in {'促销主图', '效果展示图', '产品展示/场景图', '卖点图', '色卡/变体图', '细节特写图', '教程/步骤图', '信任背书图', '对比图', '规格参数图'} or not isinstance(image.get('visual_observation'), str) or not image['visual_observation'].strip():
+                    raise ValueError('图片缺少可靠分类或观察，请重试对应批次。')
+                seen.add(position)
+                clean_images.append({
+                    'type': text(image.get('type'), 100), 'visual_observation': text(image.get('visual_observation'), 1000),
+                    'source_image_index': position, 'source_url': reference['url'],
+                    'image_url': reference['image_urls'][position - 1], 'reference_title': reference['title'],
+                    'recognized_texts': normalize_recognized_text(image.get('recognized_texts')),
+                })
+            count += len(clean_images)
+            benefits = analysis.get('core_benefits')
+            clean_analyses.append({'images': clean_images, 'core_benefits': [text(value, 500) for value in benefits[:20]] if isinstance(benefits, list) else [], 'overall_structure': {}})
+        if count < 1 or count > MAX_IMAGES_PER_ANALYSIS:
+            raise ValueError('可汇总的图片必须为 1 至 180 张。')
+        result = summarize_reference_analyses(references, clean_analyses, our, bool(payload.get('same_product')), text(payload.get('purpose'), 2000))
+        result['model'] = model or '服务默认模型'
+        return {'result': result}
+    finally:
+        _request_ai_config.reset(token)
+
+
 class Handler(BaseHTTPRequestHandler):
     server_version = "ImageBriefLocal/1.0"
 
     def log_message(self, format_string, *args):
-        print("[%s] %s" % (self.log_date_time_string(), format_string % args))
+        # Never log raw URLs, headers, bodies, or credentials.
+        return
+
+    def end_headers(self):
+        self.send_header('X-Content-Type-Options', 'nosniff')
+        self.send_header('Referrer-Policy', 'no-referrer')
+        self.send_header('X-Frame-Options', 'DENY')
+        self.send_header('Content-Security-Policy', "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' https: http: data:; connect-src 'self'; base-uri 'none'; frame-ancestors 'none'; form-action 'self'")
+        self.send_header('X-App-Version', BUILD_VERSION)
+        self.send_header('X-Request-ID', getattr(self, 'request_id', '') or uuid.uuid4().hex)
+        super().end_headers()
 
     def request_path(self):
         parsed = urllib.parse.urlsplit(self.path)
@@ -1724,6 +1896,9 @@ class Handler(BaseHTTPRequestHandler):
 
     def send_json(self, value, status=200):
         encoded = json.dumps(value, ensure_ascii=False).encode("utf-8")
+        if len(encoded) > 4 * 1024 * 1024:
+            raise RequestError('结果过大，请减少图片或链接后重试。', 413, 'RESULT_TOO_LARGE')
+        self.response_status = status
         self.send_response(status)
         self.send_header("Content-Type", "application/json; charset=utf-8")
         self.send_header("Content-Length", str(len(encoded)))
@@ -1737,30 +1912,30 @@ class Handler(BaseHTTPRequestHandler):
         except ValueError:
             raise ValueError("请求长度无效。") from None
         if length <= 0 or length > MAX_BODY_BYTES:
-            raise ValueError("请求内容为空或超过 12 MB。")
+            raise RequestError('请求内容为空或超过 3 MB，请减少图片或链接。', 413, 'REQUEST_TOO_LARGE')
         try:
-            return json.loads(self.rfile.read(length).decode("utf-8"))
+            self.connection.settimeout(20)
+            payload = json.loads(self.rfile.read(length).decode("utf-8"))
         except (UnicodeDecodeError, json.JSONDecodeError):
             raise ValueError("请求内容不是有效 JSON。") from None
+        if not isinstance(payload, dict):
+            raise ValueError('请求内容必须是 JSON 对象。')
+        return payload
 
     def do_GET(self):
         path = self.request_path()
         if path == "/healthz":
-            self.send_json({"ok": True, "template_ready": TEMPLATE_PATH.is_file()})
+            self.send_json({"ok": TEMPLATE_PATH.is_file(), "template_ready": TEMPLATE_PATH.is_file(), 'version': BUILD_VERSION, 'analysis_mode': 'resumable_batches', 'batch_size': STEP_IMAGE_LIMIT}, 200 if TEMPLATE_PATH.is_file() else 503)
             return
         elif path == "/":
             target = WEB_DIR / "index.html"
         elif path in ("/style.css", "/app.js"):
             target = WEB_DIR / path.rsplit("/", 1)[-1]
         elif path == "/api/config":
-            self.send_json({"api_base_url": _ai_api_base_url, "collection_method": "direct_then_request_user_brightdata"})
+            self.send_json({"api_base_url": _ai_api_base_url, "collection_method": "direct_then_request_user_brightdata", 'version': BUILD_VERSION, 'batch_size': STEP_IMAGE_LIMIT})
             return
         elif path.startswith("/api/jobs/"):
-            job = job_snapshot(path.rsplit("/", 1)[-1])
-            if not job:
-                self.send_json({"error": "采集任务不存在或服务已重启。"}, 404)
-            else:
-                self.send_json(job)
+            self.send_json({'error': '任务已改为在当前标签页分批保存，请刷新页面后继续。'}, 410)
             return
         else:
             self.send_json({"error": "未找到请求的页面。"}, 404)
@@ -1779,9 +1954,54 @@ class Handler(BaseHTTPRequestHandler):
         self.wfile.write(content)
 
     def do_POST(self):
+        self.request_id = uuid.uuid4().hex
+        self.response_status = 500
+        started = time.monotonic()
+        admitted = False
+        token = deadline.set(started + 190)
+        try:
+            address = self.client_address[0]
+            if VERCEL_RUNTIME:
+                address = self.headers.get('x-vercel-forwarded-for', address).split(',')[0].strip()[:100]
+            admission.acquire(address)
+            admitted = True
+            if not self.headers.get('Content-Type', '').lower().startswith('application/json'):
+                raise RequestError('请使用 JSON 格式提交请求。', 415, 'CONTENT_TYPE')
+            payload = self.read_json()
+            self._dispatch_post(payload)
+        except (BrokenPipeError, ConnectionResetError):
+            self.response_status = 499
+        except Exception as exc:
+            status = exc.status if isinstance(exc, RequestError) else 400 if isinstance(exc, (ValueError, TypeError, KeyError, AttributeError)) else 504 if isinstance(exc, (TimeoutError, socket.timeout)) else 500
+            reason = str(exc) if isinstance(exc, ValueError) else '请求数据格式无效，请刷新后重试。' if status == 400 else '本批请求超时，已完成结果保留；请稍后继续。' if status == 504 else '本批暂时未完成，已完成结果保留；请稍后继续。'
+            reason = redact_secrets(reason, text(self.headers.get('X-User-AI-Key'), 1000))
+            if 'payload' in locals():
+                reason = redact_secrets(reason, text(payload.get('brightdata_api_token'), 1000))
+            try:
+                self.send_json({'error': reason, 'code': getattr(exc, 'code', 'REQUEST_FAILED'), 'request_id': self.request_id}, status)
+            except (BrokenPipeError, ConnectionResetError):
+                pass
+        finally:
+            deadline.reset(token)
+            if admitted:
+                admission.slots.release()
+            print(json.dumps({'request_id': self.request_id, 'path': self.request_path(), 'status': self.response_status, 'duration_ms': round((time.monotonic() - started) * 1000)}))
+
+    def _dispatch_post(self, payload):
         path = self.request_path()
         try:
-            payload = self.read_json()
+            if path == '/api/research/link':
+                self.send_json(research_link(payload))
+                return
+            if path in ('/api/analyze/batch', '/api/analyze/summary'):
+                key = text(self.headers.get('X-User-AI-Key'), 1000)
+                if not key or any(ord(character) < 32 for character in key):
+                    raise ValueError('请先保存你自己的 AI API Key。')
+                payload['_request_key'] = key
+                self.send_json(analysis_step(payload, summary=path.endswith('/summary')))
+                return
+            if path in ('/api/research', '/api/analyze'):
+                raise RequestError('已升级为分批处理，请刷新页面后继续，避免旧页面长请求超时。', 410, 'CLIENT_UPDATE_REQUIRED')
             if path == "/api/config":
                 self.send_json({"error": "Bright Data 凭据由每位访客随商品读取请求单独提供；请在浏览器的个人采集设置中填写。"}, 410)
                 return
@@ -1801,75 +2021,14 @@ class Handler(BaseHTTPRequestHandler):
                 finally:
                     _request_ai_config.reset(context_token)
                 return
-            if path == "/api/research":
-                brightdata_api_token = text(payload.pop("brightdata_api_token", ""), 1000).strip()
-                brightdata_zone = text(payload.pop("brightdata_zone", ""), 200).strip()
-                if bool(brightdata_api_token) != bool(brightdata_zone):
-                    raise ValueError("请同时填写 Bright Data API Key 和 Web Unlocker Zone，或两项都留空。")
-                if any(ord(character) < 32 for character in brightdata_api_token + brightdata_zone):
-                    raise ValueError("Bright Data 凭据格式无效。")
-                brightdata_config = (brightdata_api_token, brightdata_zone)
-                references = payload.get("reference_urls") or []
-                if isinstance(references, str):
-                    references = [line.strip() for line in references.splitlines() if line.strip()]
-                if not isinstance(references, list):
-                    raise ValueError("参考商品链接请按每行一条的格式填写。")
-                if len(references) > MAX_REFERENCE_LINKS:
-                    raise ValueError(f"参考商品链接最多支持 {MAX_REFERENCE_LINKS} 个。")
-                if not text(payload.get("product_url")) and not references:
-                    raise ValueError("请填写我方商品链接或至少一个参考商品链接。")
-                job_id = uuid.uuid4().hex
-                job = {"job_id": job_id, "status": "排队中", "progress": "等待采集任务开始", "done": False, "completed": 0, "total": 0, "created_at": dt.datetime.now().isoformat(timespec="seconds")}
-                with _jobs_lock:
-                    _jobs[job_id] = job
-                    while len(_jobs) > 80:
-                        _jobs.pop(next(iter(_jobs)))
-                if VERCEL_RUNTIME:
-                    perform_research(job_id, payload, brightdata_config)
-                    completed_job = job_snapshot(job_id) or job
-                    self.send_json(completed_job)
-                else:
-                    threading.Thread(target=perform_research, args=(job_id, payload, brightdata_config), daemon=True).start()
-                    self.send_json(job, 202)
-                return
-            if path == "/api/analyze":
-                api_key = text(self.headers.get("X-User-AI-Key"), 1000)
-                if not api_key or any(ord(character) < 32 for character in api_key):
-                    raise ValueError("请先填写并保存你自己的 AI API Key。")
-                base_url, _ = normalize_ai_api_base_url(payload.get("api_base_url", DEFAULT_AI_API_BASE_URL))
-                if urllib.parse.urlsplit(base_url).scheme != "https":
-                    raise ValueError("AI API Base URL 必须使用 HTTPS，避免传输 API Key 时被截取。")
-                vision_model = "" if payload.get("use_provider_default") else text(payload.get("vision_model"), 200)
-                ai_config = (api_key, base_url, vision_model)
-                source_job_id = text(payload.get("research_job_id"), 80)
-                if VERCEL_RUNTIME and isinstance(payload.get("research_result"), dict):
-                    source_job = {"result": payload["research_result"], "done": True}
-                else:
-                    source_job = job_snapshot(source_job_id)
-                if not source_job or not source_job.get("done") or not source_job.get("result"):
-                    raise ValueError("商品采集结果已过期或尚未完成，请重新提交链接。")
-                selected_product_ids = payload.get("selected_product_ids") or payload.get("selected_asins") or ([payload.get("selected_asin")] if payload.get("selected_asin") else [])
-                if not selected_product_ids:
-                    raise ValueError("请至少选择一条参考商品链接。")
-                job_id = uuid.uuid4().hex
-                job = {"job_id": job_id, "status": "排队中", "progress": "等待视觉分析", "done": False, "completed": 0, "total": 0, "created_at": dt.datetime.now().isoformat(timespec="seconds")}
-                with _jobs_lock:
-                    _jobs[job_id] = job
-                    while len(_jobs) > 80:
-                        _jobs.pop(next(iter(_jobs)))
-                if VERCEL_RUNTIME:
-                    perform_analysis(job_id, source_job, payload, ai_config)
-                    completed_job = job_snapshot(job_id) or job
-                    self.send_json(completed_job)
-                else:
-                    threading.Thread(target=perform_analysis, args=(job_id, source_job, payload, ai_config), daemon=True).start()
-                    self.send_json(job, 202)
-                return
             if path == "/api/export":
                 data = export_workbook(payload)
+                if len(data) > 4 * 1024 * 1024:
+                    raise RequestError('Excel 文件过大，请减少条目后重新导出。', 413, 'EXPORT_TOO_LARGE')
                 product = payload.get("product") or {}
                 base = re.sub(r"[^A-Za-z0-9_-]+", "_", text(product.get("sku") or product.get("asin") or "design_brief", 80)).strip("_") or "design_brief"
                 self.send_response(200)
+                self.response_status = 200
                 self.send_header("Content-Type", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
                 self.send_header("Content-Disposition", f'attachment; filename="image_brief_{base}.xlsx"')
                 self.send_header("Content-Length", str(len(data)))
@@ -1877,10 +2036,8 @@ class Handler(BaseHTTPRequestHandler):
                 self.wfile.write(data)
                 return
             self.send_json({"error": "未找到请求的接口。"}, 404)
-        except ValueError as exc:
-            self.send_json({"error": str(exc)}, 400)
-        except Exception as exc:
-            self.send_json({"error": "服务器处理失败：" + text(exc, 1000)}, 500)
+        except Exception:
+            raise
 
 
 if __name__ == "__main__":

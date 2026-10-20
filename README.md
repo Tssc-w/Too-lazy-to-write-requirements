@@ -31,7 +31,13 @@ Bright Data Web Unlocker 是可选的个人回退采集服务。每位访客在�
 
 ## 发布到 Vercel
 
-仓库已包含 `api/index.py` 和 `vercel.json`。Vercel 使用 Python Function 提供 API 和网页文件；采集与 AI 分析在单次请求内完成，分析所需的采集结果由浏览器随请求提交，不依赖函数实例之间共享内存或后台线程。
+仓库已包含 `api/index.py` 和 `vercel.json`。Vercel 使用 Python Function 提供 API 和网页文件。商品采集按链接单独请求；AI 按每批 4 张图片独立识别，最后单独汇总。浏览器最多并行两批，每批完成即保存在当前标签页的 `sessionStorage`；刷新后可恢复，24 小时内继续会复用成功批次，只重试未完成部分。关闭标签页或清除浏览器存储会失去恢复数据。个人 Key 不写入业务草稿、服务端任务或日志。
+
+每次请求限制 3 MB、上游 AI 响应限制 2 MB、导出最多 200 行；单次处理预算 190 秒，携带凭据的 API 请求只支持公网 HTTPS（443/8443），不跟随重定向。反爬页面、AI 空对象或缺失图片记录不会被当作成功。接口包含每实例并发与访客请求限流；大规模公开服务仍应在 Vercel Firewall 配置跨实例限流。日志仅记录请求编号、接口路径、状态与耗时。
+
+`GET /healthz` 返回部署版本、模板状态和批大小。旧的整次 `/api/research`、`/api/analyze` 和共享 `/api/jobs/*` 已停用，旧页面需要刷新。新接口为 `/api/research/link`、`/api/analyze/batch`、`/api/analyze/summary`。不需要新增付费服务或共享 API Key 即可使用此恢复流程。
+
+回归验证：`python -m unittest discover -s tests -v`；`node --check web/app.js`。浏览器恢复与实际导出验证使用 `node tests/browser_reliability.cjs`（需本地服务在 18766 和 Chrome；外部 AI/采集响应使用测试桩，不消费个人 API 额度）。
 
 1. 将项目推送到一个 GitHub 仓库（建议设为 Private），不要提交 `.env`、API Key、`outputs/` 或 `node_modules/`。
 2. 在 Vercel 选择 **Add New → Project**，连接该 GitHub 仓库并部署。Vercel 会提供 `*.vercel.app` HTTPS 地址，不需要购买域名。
