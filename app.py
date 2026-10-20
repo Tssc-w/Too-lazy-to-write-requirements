@@ -180,7 +180,9 @@ class _PublicHTTPHandler(urllib.request.HTTPHandler):
 
 class _PublicHTTPSHandler(urllib.request.HTTPSHandler):
     def https_open(self, request):
-        return self.do_open(_PublicHTTPSConnection, request, context=self._context, check_hostname=self._check_hostname)
+        # `_check_hostname` is a private attribute not set by every supported
+        # Python runtime. The SSLContext already carries hostname verification.
+        return self.do_open(_PublicHTTPSConnection, request, context=self._context)
 
 
 def image_urls(value, base_url=""):
