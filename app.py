@@ -1483,6 +1483,14 @@ class Handler(BaseHTTPRequestHandler):
     def log_message(self, format_string, *args):
         print("[%s] %s" % (self.log_date_time_string(), format_string % args))
 
+    def request_path(self):
+        parsed = urllib.parse.urlsplit(self.path)
+        if VERCEL_RUNTIME and parsed.path in {"/api/index.py", "/api/index"}:
+            routed_path = urllib.parse.parse_qs(parsed.query).get("__vercel_path", [""])[0]
+            if routed_path.startswith("/"):
+                return urllib.parse.urlsplit(routed_path).path
+        return parsed.path
+
     def send_json(self, value, status=200):
         encoded = json.dumps(value, ensure_ascii=False).encode("utf-8")
         self.send_response(status)
@@ -1505,7 +1513,7 @@ class Handler(BaseHTTPRequestHandler):
             raise ValueError("请求内容不是有效 JSON。") from None
 
     def do_GET(self):
-        path = urllib.parse.urlsplit(self.path).path
+        path = self.request_path()
         if path == "/healthz":
             self.send_json({"ok": True, "template_ready": TEMPLATE_PATH.is_file()})
             return
@@ -1541,7 +1549,7 @@ class Handler(BaseHTTPRequestHandler):
         self.wfile.write(content)
 
     def do_POST(self):
-        path = urllib.parse.urlsplit(self.path).path
+        path = self.request_path()
         try:
             payload = self.read_json()
             if path == "/api/config":

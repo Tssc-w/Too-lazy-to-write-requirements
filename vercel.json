@@ -6,6 +6,8 @@
     }
   },
   "rewrites": [
-    { "source": "/(.*)", "destination": "/api/index.py" }
+    { "source": "/", "destination": "/api/index.py?__vercel_path=/" },
+    { "source": "/api/:path*", "destination": "/api/index.py?__vercel_path=/api/:path*" },
+    { "source": "/:path*", "destination": "/api/index.py?__vercel_path=/:path*" }
   ]
 }
