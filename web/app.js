@@ -313,9 +313,13 @@
     const suggestions = group.suggestions || [];
     const sources = group.reference_sources || [];
     const examples = group.example_images || [];
+    const recognizedTexts = group.recognized_texts || [];
+    const languageLabels = { zh: '中文', en: 'English', ko: '한국어', other: '其他语言' };
+    const recognizedTextMarkup = recognizedTexts.length ? `<details class="ocr-text-details"><summary>图片文字识别：${recognizedTexts.length} 张图片</summary><div class="ocr-text-list">${recognizedTexts.map(record => `<article><strong>${esc(record.reference_title || '参考商品')}${record.sequence_position ? ` · 第 ${esc(record.sequence_position)} 张` : ''}</strong>${(record.recognized_texts || []).map(item => `<div class="ocr-text-item"><span>${esc(languageLabels[item.language] || '其他语言')}</span><p>${esc(item.original || '')}</p>${item.chinese_translation && item.language !== 'zh' ? `<small>中文释义：${esc(item.chinese_translation)}</small>` : ''}</div>`).join('')}</article>`).join('')}</div></details>` : '';
     return `<section class="image-group-card">
       <header><div><span>图片类型 · ${esc(group.image_count || 0)} 张作为参考</span><h3>${esc(group.type)}</h3></div><span class="editable-pill">${suggestions.length} 项建议</span></header>
       <p class="group-common-pattern"><strong>同类图片共性</strong>${esc(group.shared_patterns || '未返回共性描述，请结合下方建议复核。')}</p>
+      ${recognizedTextMarkup}
       ${sources.length ? `<div class="group-sources">参考来源：${sources.map((url, index) => `<a href="${esc(url)}" target="_blank" rel="noopener noreferrer">链接 ${index + 1} ↗</a>`).join(' ')}</div>` : ''}
       <div class="example-gallery"><strong>对应竞品例图</strong><small>以下为本类型实际采集的参考图片，供理解方案方向；不是生成后的我方成图。</small><div class="example-gallery-grid">${examples.map(example => `<a class="example-image" href="${esc(example.image_url)}" target="_blank" rel="noopener noreferrer"><img src="${esc(example.image_url)}" alt="${esc(example.reference_title || group.type)} 参考例图" loading="lazy" referrerpolicy="no-referrer"><span>${esc(example.reference_title || '参考竞品')}${example.sequence_position ? ` · 第 ${esc(example.sequence_position)} 张` : ''}</span></a>`).join('') || '<span class="example-empty">本类型未返回可展示的图片地址，可从上方商品来源链接查看。</span>'}</div></div>
       <div class="suggestion-grid">${suggestions.map((suggestion, suggestionIndex) => `<article class="suggestion-card">

@@ -5,7 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <meta name="theme-color" content="#142f48">
   <title>图需工作台 | 竞品套图分析</title>
-  <link rel="stylesheet" href="/style.css?v=20261020-user-brightdata">
+  <link rel="stylesheet" href="/style.css?v=20261020-multilingual-text">
 </head>
 <body>
   <header class="topbar">
@@ -18,7 +18,7 @@
       <div>
         <p class="eyebrow">PRODUCT IMAGE WORKFLOW</p>
         <h1>从商品链接到可编辑的套图分类建议</h1>
-        <p class="intro-copy">读取商品页实际返回的卖点、参数和图片，分析一组竞品套图，并生成中英文图上短语与生图指令。</p>
+        <p class="intro-copy">读取商品页实际返回的卖点、参数和图片，识别中文、英文与韩文商品及图片文字，并分析竞品套图。</p>
       </div>
       <div class="steps" aria-label="工作流程"><span class="step current"><b>01</b> 商品链接</span><span class="step-line"></span><span class="step"><b>02</b> 套图分析</span><span class="step-line"></span><span class="step"><b>03</b> 编辑与导出</span></div>
     </section>
@@ -44,7 +44,7 @@
         <label class="field field-wide"><span>补充要求 <small>选填</small></span><textarea id="purpose" rows="2" placeholder="例如：重点说明尺寸和安装方式，图上文案使用英文并附中文对照。"></textarea></label>
       </div>
       <div class="research-controls">
-        <div class="cost-note"><span class="info-dot">i</span><span>支持可公开访问的 HTTP(S) 商品页面。先尝试直连读取；失败时可使用你在个人设置中提供的 Bright Data 重试。需要登录、验证码、仅由 JavaScript 渲染或禁止自动访问的页面可能无法读取，商品卡会显示失败原因。</span></div>
+        <div class="cost-note"><span class="info-dot">i</span><span>支持可公开访问的 HTTP(S) 商品页面，并识别中文、英文和韩文商品文字与图片文字，英文/韩文图片文字会附中文释义。先尝试直连读取；失败时可使用你在个人设置中提供的 Bright Data 重试。需要登录、验证码、仅由 JavaScript 渲染或禁止自动访问的页面可能无法读取，商品卡会显示失败原因。</span></div>
         <button id="research-button" class="button button-primary" type="button"><span class="search-glyph">⌕</span> 读取商品信息与图片</button>
       </div>
       <div id="research-message" class="message" role="status" aria-live="polite"></div>
@@ -78,7 +78,7 @@
     </section>
 
     <section id="analysis-section" class="panel analysis-panel hidden">
-      <div class="section-heading"><div><span class="section-kicker">03 / AI ANALYSIS</span><h2>套图共性总结、分类建议与画面文案</h2><p>产品展示图与场景图合并后总结四条共性，并给出两项类型级建议；其余出现的图片类型也各给两项建议，不展示逐张分析。</p></div><div class="analysis-actions"><button id="copy-all-prompts" class="button button-secondary" type="button">复制全部提示词</button><button id="export-button" class="button button-primary" type="button">填写模板并下载 Excel</button></div></div>
+      <div class="section-heading"><div><span class="section-kicker">03 / AI ANALYSIS</span><h2>套图共性总结、分类建议与画面文案</h2><p>AI 可识别图片中的中文、英文和韩文，原文与中文释义按图片类型查看；产品展示图与场景图合并后总结四条共性，并给出类型级建议。</p></div><div class="analysis-actions"><button id="copy-all-prompts" class="button button-secondary" type="button">复制全部提示词</button><button id="export-button" class="button button-primary" type="button">填写模板并下载 Excel</button></div></div>
       <div id="product-summary" class="product-summary"></div>
       <div class="summary-block"><h3 id="summary-heading">四条产品展示/场景图共性总结</h3><div id="summary-points" class="summary-points"></div></div>
       <div id="structure-summary" class="structure-grid"></div>
@@ -90,6 +90,6 @@
 
     <footer class="page-footer">商品页事实仅取页面实际返回内容，并标明直采或 Bright Data 来源。套图视觉规律由 AI 按类型归纳；建议中的画面文案与生图指令可人工修改。生图指令以吸引点击为设计目标，不代表已验证点击率。</footer>
   </main>
-  <script src="/app.js?v=20261020-image-format-recovery" defer></script>
+  <script src="/app.js?v=20261020-multilingual-text" defer></script>
 </body>
 </html>

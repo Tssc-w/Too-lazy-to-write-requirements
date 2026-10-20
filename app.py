@@ -331,10 +331,16 @@ def _table_specs(html_source):
 def _fetch_product_direct(url, role):
     url = _public_http_url(url)
     asin = amazon_asin(url)
+    host = (urllib.parse.urlsplit(url).hostname or "").lower().rstrip(".")
+    is_korean_site = host.endswith(".kr") or host == "coupang.com" or host.endswith(".coupang.com")
+    accept_language = (
+        "ko-KR,ko;q=0.95,en;q=0.85,zh-CN;q=0.75"
+        if is_korean_site else "zh-CN,zh;q=0.9,en;q=0.85,ko;q=0.75"
+    )
     request = urllib.request.Request(url, headers={
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/140.0 Safari/537.36",
         "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-        "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.8",
+        "Accept-Language": accept_language,
     })
     opener = urllib.request.build_opener(urllib.request.ProxyHandler({}), _PublicRedirectHandler(), _PublicHTTPHandler(), _PublicHTTPSHandler())
     try:
@@ -482,6 +488,35 @@ def get_ai_config():
         return request_config
     with _ai_config_lock:
         return _ai_api_key, _ai_api_base_url, _ai_vision_model
+
+
+def normalize_recognized_text(value):
+    if not isinstance(value, list):
+        return []
+    language_names = {
+        "zh": "zh", "zh-cn": "zh", "zh-tw": "zh", "chinese": "zh", "中文": "zh",
+        "en": "en", "english": "en", "英语": "en", "英文": "en",
+        "ko": "ko", "ko-kr": "ko", "korean": "ko", "한국어": "ko", "韩语": "ko", "韩文": "ko",
+    }
+    recognized, seen = [], set()
+    for item in value[:5]:
+        if not isinstance(item, dict):
+            continue
+        original = text(item.get("original"), 180)
+        if not original:
+            continue
+        raw_language = text(item.get("language"), 30).casefold()
+        language = language_names.get(raw_language, "other")
+        key = (language, original.casefold())
+        if key in seen:
+            continue
+        seen.add(key)
+        recognized.append({
+            "language": language,
+            "original": original,
+            "chinese_translation": text(item.get("chinese_translation"), 240),
+        })
+    return recognized
 
 
 def submit_with_context(executor, function, *args):
@@ -957,12 +992,13 @@ def call_openai_vision(references, our_product, same_product, user_requirements=
     our_facts = our_product or {}
     system = (
         "你是跨平台电商产品图片分析与视觉需求顾问。严格区分商品页事实和图片观察。"
+        "可识别简体/繁体中文、英语和韩语商品文字及图片内文字。理解韩语和英语商品页事实，并用简体中文写摘要；OCR 原文须逐字保留，英语或韩语同时提供忠实的简体中文释义，中文原文释义可照录。看不清的文字不要猜测，数字、型号、品牌名不要擅自翻译。"
         "尽量遵守用户补充的设计要求，但用户要求不能作为商品事实或授权你补造商品属性。"
         "不得补造规格、材料、认证、折扣、性能、排名、评论或销量。短文案只能依据商品页已返回卖点。"
         "你只需为后续跨图片归纳收集分类标签和极简观察，不要逐张写分析、判断依据、文案或生图指令。"
         "按输入顺序内部分类；产品展示图和场景图统一归入产品展示/场景图。其余类型只能从以下列表中选：" + "、".join(allowed_types) + "。"
-        "每张图片只返回 index、type、visual_observation；观察限于可见元素，不写推测。"
-        "以 JSON 对象返回字段 product_summary_zh, core_benefits(array), differentiation_zh, source_basis_zh, overall_structure(object: sequence, style, composition, color, material_presentation, copy_strategy), image_analyses(array: index,type,visual_observation)。"
+        "每张图片返回 index、type、visual_observation、recognized_text(array)。recognized_text 最多返回 5 个最清晰且有商品信息意义的文字片段；每项包含 language（zh/en/ko/other）、original（可辨认的原文）和 chinese_translation（简体中文释义）；没有可辨认文字时返回空数组。观察限于可见元素，不写推测。"
+        "以 JSON 对象返回字段 product_summary_zh, core_benefits(array), differentiation_zh, source_basis_zh, overall_structure(object: sequence, style, composition, color, material_presentation, copy_strategy), image_analyses(array: index,type,visual_observation,recognized_text)。"
         "商品页事实与图片观察必须区分，不得补造规格、材料、认证、折扣、性能、排名、评论或销量。"
         "当我方商品事实缺失时，product_summary_zh 只概括参考商品，differentiation_zh 说明缺少我方商品信息。"
         "当 same_product 为 true 时，differentiation_zh 明确说明页面证据未支持我方与参考商品之间的差异化结论。"
@@ -974,7 +1010,7 @@ def call_openai_vision(references, our_product, same_product, user_requirements=
         "reference_product": reference_facts[0],
         "reference_images_in_page_order": [{key: image[key] for key in ("index", "source_image_index", "asin", "title", "source_url", "url")} for image in images_payload],
     }
-    content = [{"type": "text", "text": "请识别此参考商品套图中的类型与可见共性，返回中的分类和观察须遵守系统规则。\n" + json.dumps(context, ensure_ascii=False)}]
+    content = [{"type": "text", "text": "请识别此参考商品套图中的类型、可见共性和中英韩文字，返回中的分类、文字原文及中文释义须遵守系统规则。\n" + json.dumps(context, ensure_ascii=False)}]
     for item in images_payload:
         content.append({"type": "text", "text": f"参考商品的第 {item['source_image_index']} 张；图片序号 {item['index']}；来源 {item['source_url']}"})
         content.append({"type": "image_url", "image_url": {"url": item["url"], "detail": OPENAI_VISION_DETAIL}})
@@ -1001,11 +1037,13 @@ def call_openai_vision(references, our_product, same_product, user_requirements=
             image_type = "产品展示/场景图"
         if image_type not in allowed_types:
             image_type = "产品展示/场景图"
+        recognized_texts = normalize_recognized_text(row.get("recognized_text"))
         result["images"].append({
             "index": item["index"], "source_image_index": item["source_image_index"],
             "reference_index": item["reference_index"], "reference_title": item["title"],
             "image_url": item["url"],
             "type": image_type, "visual_observation": row.get("visual_observation", ""),
+            "recognized_texts": recognized_texts,
             "source_url": item["source_url"], "asin": item["asin"],
         })
     result.pop("image_analyses", None)
@@ -1070,14 +1108,19 @@ def summarize_reference_analyses(references, analyses, our_product, same_product
             return "产品展示/场景图"
         return value
 
-    grouped = {kind: {"count": 0, "observations": [], "sources": [], "example_images": [], "example_urls": set()} for kind in display_types}
+    grouped = {kind: {
+        "count": 0, "observations": [], "sources": [], "example_images": [], "example_urls": set(),
+        "recognized_texts": [], "recognized_text_samples": [],
+    } for kind in display_types}
     source_rows = []
     total_images = 0
+    total_ocr_samples = 0
     for index, (reference, analysis) in enumerate(zip(references, analyses), 1):
         images = analysis.get("images", [])
         total_images += len(images)
         type_counts = {}
         per_reference_samples = {}
+        per_reference_ocr_samples = {}
         for image in images:
             image_type = normalized_type(image.get("type") or "产品展示/场景图")
             if image_type not in grouped:
@@ -1085,6 +1128,26 @@ def summarize_reference_analyses(references, analyses, our_product, same_product
             type_counts[image_type] = type_counts.get(image_type, 0) + 1
             entry = grouped[image_type]
             entry["count"] += 1
+            recognized_texts = normalize_recognized_text(image.get("recognized_texts"))
+            if recognized_texts:
+                text_record = {
+                    "reference_title": text(reference.get("title") or reference.get("asin") or f"参考链接 {index}", 300),
+                    "sequence_position": image.get("source_image_index"),
+                    "source_url": text(image.get("source_url") or reference.get("url"), 2000),
+                    "image_url": text(image.get("image_url"), 2000),
+                    "recognized_texts": recognized_texts,
+                }
+                if len(entry["recognized_texts"]) < MAX_IMAGES_PER_ANALYSIS:
+                    entry["recognized_texts"].append(text_record)
+                ocr_samples = per_reference_ocr_samples.setdefault(image_type, 0)
+                if ocr_samples < 2 and total_ocr_samples < 40:
+                    entry["recognized_text_samples"].append({
+                        "reference_title": text_record["reference_title"],
+                        "sequence_position": text_record["sequence_position"],
+                        "recognized_texts": recognized_texts[:3],
+                    })
+                    per_reference_ocr_samples[image_type] += 1
+                    total_ocr_samples += 1
             if reference.get("url") and reference["url"] not in entry["sources"]:
                 entry["sources"].append(reference["url"])
             example_url = text(image.get("image_url"), 2000)
@@ -1096,6 +1159,7 @@ def summarize_reference_analyses(references, analyses, our_product, same_product
                     "reference_title": text(image.get("reference_title") or reference.get("title") or reference.get("asin"), 300),
                     "sequence_position": image.get("source_image_index"),
                     "visual_observation": text(image.get("visual_observation"), 220),
+                    "recognized_texts": recognized_texts,
                 })
             samples = per_reference_samples.setdefault(image_type, 0)
             if samples < 2 and image.get("visual_observation"):
@@ -1116,7 +1180,8 @@ def summarize_reference_analyses(references, analyses, our_product, same_product
     visual_groups = [{
         "type": kind, "image_count": info["count"],
         "reference_links": info["sources"], "representative_visual_observations": info["observations"][:12],
-        "example_images": info["example_images"],
+        "example_images": info["example_images"], "recognized_text_samples": info["recognized_text_samples"][:40],
+        "recognized_texts": info["recognized_texts"],
     } for kind, info in grouped.items() if info["count"]]
     summary_group = next((group for group in visual_groups if group["type"] == "产品展示/场景图"), None)
     # The merged product-display / lifestyle category gets both its four shared
@@ -1125,6 +1190,7 @@ def summarize_reference_analyses(references, analyses, our_product, same_product
     suggestion_groups = visual_groups
     system = (
         "你是跨平台电商套图研究顾问。只根据给出的商品页事实、图片分类和画面观察归纳，不补造规格、材料、认证、排名、销量或图片中不可见的属性。"
+        "商品事实可能是中文、英语或韩语；理解原文后用简体中文写摘要和建议。可参考 recognized_text_samples 中的图片文字及中文释义来理解竞品表达，但不要照搬竞品原文、品牌或商标。"
         "产品展示图与场景图已合并为同一个类型。summary_points 必须恰好给出四条该合并类型图片的共同点总结；不得逐张叙述、不得引用单张图序。若输入没有该类型，则总结其余套图共同规律。"
         "image_groups 覆盖输入中出现的每一种图片类型，包括合并后的产品展示/场景图。产品展示/场景图除四条共性总结外，还必须给出恰好两个不同、可执行的类型级设计建议；其余每种出现的类型也必须给出恰好两个不同建议。不得逐张分析或针对单张图写建议。建议结合该类型观察到的共性，不得重复换词。"
         "每条建议都必须有画面文案/卖点文字 copy_zh，写成可直接排版在图片上的短句；若商品事实不足以支持文案或我方定制指令，对应字段留空，不得编造卖点。英文文案 copy_en 可提供自然英文版本。"
@@ -1138,7 +1204,7 @@ def summarize_reference_analyses(references, analyses, our_product, same_product
         "our_product_page_facts": {key: our_product.get(key) for key in ("title", "asin", "url", "brand", "price", "features", "description", "specifications") if our_product and our_product.get(key)},
         "user_design_requirements": text(user_requirements, 2000),
         "reference_analyses": source_rows,
-        "images_grouped_by_type": [{key: value for key, value in group.items() if key != "example_images"} for group in visual_groups],
+        "images_grouped_by_type": [{key: value for key, value in group.items() if key not in {"example_images", "recognized_texts"}} for group in visual_groups],
     }
     result = call_openai_chat([
         {"role": "system", "content": system},
@@ -1185,6 +1251,7 @@ def summarize_reference_analyses(references, analyses, our_product, same_product
             "shared_patterns": text(generated_group.get("shared_patterns"), 700),
             "reference_sources": visual_group["reference_links"],
             "example_images": visual_group["example_images"],
+            "recognized_texts": visual_group["recognized_texts"],
             "suggestions": normalized_suggestions,
         })
     result["image_count"] = total_images
@@ -1503,6 +1570,58 @@ def add_ai_analysis_sheet(wb, analysis):
     ws.auto_filter.ref = f"A25:J{max(25, row_idx - 1)}"
 
 
+def add_multilingual_text_sheet(wb, analysis):
+    sheet_name = "中英韩图片文字识别"
+    if sheet_name in wb.sheetnames:
+        del wb[sheet_name]
+    ws = wb.create_sheet(sheet_name)
+    ws.sheet_view.showGridLines = False
+    navy = "193A5A"
+    pale = "DCEAF5"
+    thin = Side(style="thin", color="CBD5DF")
+    ws.merge_cells("A1:H1")
+    ws["A1"] = "中文、英文与韩文图片文字识别及中文释义"
+    ws["A1"].font = Font(name="Microsoft YaHei", size=15, bold=True, color="FFFFFF")
+    ws["A1"].fill = PatternFill("solid", fgColor=navy)
+    ws["A1"].alignment = Alignment(vertical="center")
+    ws.row_dimensions[1].height = 32
+    headers = ["图片类型", "参考商品", "图片序号", "识别语言", "图片原文", "中文释义", "商品页链接", "图片链接"]
+    for col, header in enumerate(headers, 1):
+        cell = ws.cell(3, col, header)
+        cell.font = Font(name="Microsoft YaHei", size=9, bold=True, color=navy)
+        cell.fill = PatternFill("solid", fgColor=pale)
+        cell.alignment = Alignment(horizontal="center", vertical="center", wrap_text=True)
+        cell.border = Border(bottom=thin)
+    language_labels = {"zh": "中文", "en": "English", "ko": "한국어", "other": "其他语言"}
+    row_idx = 4
+    for group in analysis.get("image_groups") or []:
+        for image in group.get("recognized_texts") or []:
+            for phrase in image.get("recognized_texts") or []:
+                values = [
+                    group.get("type"), image.get("reference_title"), image.get("sequence_position"),
+                    language_labels.get(phrase.get("language"), "其他语言"), phrase.get("original"),
+                    phrase.get("chinese_translation"), image.get("source_url"), image.get("image_url"),
+                ]
+                for col, value in enumerate(values, 1):
+                    cell = ws.cell(row_idx, col)
+                    set_text(cell, value, hyperlink=(col in (7, 8)))
+                    cell.font = Font(name="Microsoft YaHei", size=9, color="263445")
+                    cell.border = Border(bottom=thin)
+                ws.row_dimensions[row_idx].height = 48
+                row_idx += 1
+    if row_idx == 4:
+        ws.merge_cells("A4:H4")
+        set_text(ws["A4"], "未返回可确认的中、英或韩文图片文字；模糊或不可辨认的文字不会猜测。")
+        ws["A4"].font = Font(name="Microsoft YaHei", size=10, color="65798A")
+        ws["A4"].alignment = Alignment(vertical="top", wrap_text=True)
+        ws.row_dimensions[4].height = 32
+    else:
+        ws.auto_filter.ref = f"A3:H{row_idx - 1}"
+    for col, width in enumerate([22, 30, 12, 15, 46, 46, 42, 42], 1):
+        ws.column_dimensions[get_column_letter(col)].width = width
+    ws.freeze_panes = "A4"
+
+
 def export_workbook(payload):
     if not TEMPLATE_PATH.exists():
         raise ValueError("找不到模板文件：templates/做图需求表模版-10.12.xlsx")
@@ -1575,6 +1694,7 @@ def export_workbook(payload):
 
     add_research_sheet(wb, research)
     add_ai_analysis_sheet(wb, analysis)
+    add_multilingual_text_sheet(wb, analysis)
     output = BytesIO()
     wb.save(output)
     data = output.getvalue()
