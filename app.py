@@ -916,16 +916,33 @@ def call_openai_vision(references, our_product, same_product, user_requirements=
     return result
 
 
+def is_unsupported_image_error(error):
+    detail = text(error, 2000).lower()
+    return "unsupported image" in detail and any(image_type in detail for image_type in ("png", "jpeg", "webp"))
+
+
 def call_openai_vision_resilient(references, our_product, same_product, user_requirements="", source_image_start=1):
-    """Retry an interrupted vision batch with fewer images until it succeeds or reaches one image."""
+    """Split interrupted or invalid-image batches, skipping only a single rejected image."""
     try:
         return call_openai_vision(references, our_product, same_product, user_requirements, source_image_start)
-    except AIResponseInterruptedError:
+    except (AIResponseInterruptedError, ValueError) as exc:
+        unsupported_image = is_unsupported_image_error(exc)
+        if not isinstance(exc, AIResponseInterruptedError) and not unsupported_image:
+            raise
         if len(references) != 1:
             raise
         reference = references[0]
         image_urls = reference.get("image_urls") or []
         if len(image_urls) <= 1:
+            if unsupported_image and image_urls:
+                return {
+                    "images": [], "core_benefits": [], "warnings": [{
+                        "source_url": text(reference.get("url"), 2000),
+                        "source_title": text(reference.get("title") or reference.get("asin"), 300),
+                        "source_image_index": source_image_start,
+                        "message": "AI 服务拒绝了这张图片的格式或内容，已跳过；支持 PNG、JPEG、GIF 和 WebP。",
+                    }],
+                }
             raise
         midpoint = len(image_urls) // 2
         left_reference = dict(reference, image_urls=image_urls[:midpoint])
@@ -941,6 +958,7 @@ def call_openai_vision_resilient(references, our_product, same_product, user_req
         merged["core_benefits"] = list(dict.fromkeys(
             (left.get("core_benefits") or []) + (right.get("core_benefits") or [])
         ))
+        merged["warnings"] = (left.get("warnings") or []) + (right.get("warnings") or [])
         if right.get("overall_structure"):
             merged["overall_structure_by_batch"] = [
                 item for item in (left.get("overall_structure"), right.get("overall_structure")) if item
@@ -1119,6 +1137,7 @@ def perform_analysis(job_id, source_job, payload, ai_config):
                 batch_reference["image_urls"] = image_list[start:start + ANALYSIS_IMAGE_BATCH_SIZE]
                 batches.append((reference_index, reference, start, batch_reference))
         per_reference_batches = [[] for _ in references]
+        image_warnings = []
         completed_batches = 0
         completed_images = 0
         with ThreadPoolExecutor(max_workers=min(ANALYSIS_MAX_WORKERS, len(batches))) as executor:
@@ -1139,8 +1158,9 @@ def perform_analysis(job_id, source_job, payload, ai_config):
                         f"图片第 {start + 1}-{start + batch_size} 张批次：{text(exc, 1100)}"
                     ) from None
                 per_reference_batches[reference_index].append((start, batch_result))
+                image_warnings.extend(batch_result.get("warnings") or [])
                 completed_batches += 1
-                completed_images += len(batch_result.get("images", []))
+                completed_images += batch_size
                 update_job(job_id, status="AI 正在归纳共性", progress=f"图片视觉识别已完成 {completed_batches}/{len(batches)} 个批次；正在整理类型共性", completed=completed_images, total=image_count)
         per_reference = []
         for reference, reference_batches in zip(references, per_reference_batches):
@@ -1152,8 +1172,11 @@ def perform_analysis(job_id, source_job, payload, ai_config):
             merged["core_benefits"] = list(dict.fromkeys(benefit for analysis in analyses for benefit in analysis.get("core_benefits", [])))
             merged["overall_structure_by_batch"] = [analysis.get("overall_structure", {}) for analysis in analyses if analysis.get("overall_structure")]
             per_reference.append(merged)
+        if not any(analysis.get("images") for analysis in per_reference):
+            raise ValueError("AI 服务拒绝了所选参考商品的全部图片格式或内容；请检查图片链接，或换用支持 PNG、JPEG、GIF、WebP 的 AI 服务。")
         update_job(job_id, status="正在汇总套图规律", progress=f"已识别 {image_count} 张图片并汇总 {len(references)} 条链接；正在生成四条共性总结和分类建议", completed=image_count, total=image_count)
         combined = summarize_reference_analyses(references, per_reference, our_product, same_product, payload.get("purpose", ""))
+        combined["image_warnings"] = image_warnings
         combined["model"] = get_ai_config()[2] or "服务默认模型"
         analysis = combined
         update_job(job_id, status="分析完成", progress=f"已归纳 {len(references)} 条参考链接、{image_count} 张图片的共性，生成四条套图总结及分类建议。", result=analysis, done=True, completed=image_count, total=image_count)

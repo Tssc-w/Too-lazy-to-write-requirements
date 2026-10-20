@@ -260,7 +260,7 @@
     state.analysisBusy = true;
     state.busy = true; $('#analyze-button').disabled = true; $('#analyze-button').textContent = 'AI 分析中…';
     $('#analysis-section').classList.add('hidden');
-    message('#analysis-message', '正在将图片按每批 10 张并行分析，随后综合多条链接的共同规律。');
+    message('#analysis-message', '正在将图片按每批 10 张并行分析；遇到不支持的图片时会拆分批次并跳过问题图片。');
     const productUrl = $('#product-url').value.trim();
     const productAsin = asinFromUrl(productUrl);
     const ourItem = (state.research?.items || []).find(item => String(item.role || '').startsWith('我方商品'));
@@ -280,7 +280,11 @@
       renderAnalysis();
       $('#analysis-section').classList.remove('hidden');
       $('#analysis-section').scrollIntoView({ behavior: 'smooth', block: 'start' });
-      message('#analysis-message', `套图归纳完成：${state.analysis.reference_products?.length || 1} 条链接、${state.analysis.image_count || 0} 张图片已形成四条共性总结和 ${state.analysis.image_groups?.length || 0} 类建议（含产品展示/场景图）。`, 'success');
+      const imageWarnings = state.analysis.image_warnings || [];
+      const warningDetails = imageWarnings.length
+        ? `\n有 ${imageWarnings.length} 张图片被 AI 服务拒绝并跳过：${imageWarnings.slice(0, 5).map(item => `${item.source_title || '参考商品'}第 ${item.source_image_index} 张`).join('、')}${imageWarnings.length > 5 ? '等' : ''}。其余图片已继续分析。`
+        : '';
+      message('#analysis-message', `套图归纳完成：${state.analysis.reference_products?.length || 1} 条链接、${state.analysis.image_count || 0} 张图片已形成四条共性总结和 ${state.analysis.image_groups?.length || 0} 类建议（含产品展示/场景图）。${warningDetails}`, imageWarnings.length ? '' : 'success');
     } catch (error) { message('#analysis-message', error.message, 'error'); }
     finally { state.busy = false; state.analysisBusy = false; $('#analyze-button').textContent = '联合分析所选套图'; updateSelectedReference(); }
   }
