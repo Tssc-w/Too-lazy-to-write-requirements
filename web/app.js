@@ -348,16 +348,19 @@
   function exportRows(analysis = state.analysis || {}) {
     const structure = analysis.overall_structure || {};
     const style = [structure.style, structure.composition, structure.color, structure.material_presentation].filter(Boolean).join('；');
-    return (analysis.image_groups || []).flatMap(group => (group.suggestions || []).map((suggestion, index) => ({
-      position: `${group.type} · 方案 ${index + 1}`, type: group.type, quantity: '1',
-      size: $('#image-size').value.trim() || '2000*2000',
-      content: [group.shared_patterns, suggestion.direction, suggestion.prompt_zh].filter(Boolean).join('；'),
-      buyer_focus: suggestion.buyer_focus_zh || suggestion.direction || (analysis.core_benefits || []).join('；') || '依据参考图共性填写',
-      copy: [suggestion.copy_en, suggestion.copy_zh].filter(Boolean).join(' / ') || '待补充',
-      reference: (group.reference_sources || []).join('\n') || analysis.reference_product?.url || '无', style: style || '依据四条套图共性总结及类型建议',
-      delivery: $('#delivery-requirement').value.trim() || '高清',
-      notes: '',
-    })));
+    return (analysis.image_groups || []).flatMap(group => (group.suggestions || []).map((suggestion, index) => {
+      const type = group.type && group.type !== '待确认' ? group.type : '图片类型待补充';
+      return {
+        position: `${type} · 方案 ${index + 1}`, type, quantity: '1',
+        size: $('#image-size').value.trim() || '2000*2000',
+        content: [group.shared_patterns, suggestion.direction, suggestion.prompt_zh].filter(Boolean).join('；') || '待补充：请根据参考商品图片完善设计要求。',
+        buyer_focus: suggestion.buyer_focus_zh || suggestion.direction || (analysis.core_benefits || []).join('；') || '待补充：请人工确认目标买家关注点。',
+        copy: [suggestion.copy_en, suggestion.copy_zh].filter(Boolean).join(' / ') || '待补充',
+        reference: (group.reference_sources || []).join('\n') || analysis.reference_product?.url || '无', style: style || '依据四条套图共性总结及类型建议',
+        delivery: $('#delivery-requirement').value.trim() || '高清',
+        notes: '',
+      };
+    }));
   }
   function updateExportStatus() {
     const selection = exportSelection();
@@ -374,16 +377,15 @@
       return;
     }
     const needsCopy = Boolean(state.analysis?.our_product);
-    const issues = suggestions.flatMap(item => [
-      !item.direction.trim() ? `${item.type}有建议内容待补充` : '',
-      needsCopy && !item.copy_zh.trim() ? `${item.type}缺少画面文案/卖点文字` : '',
-    ].filter(Boolean));
-    $('#export-button').disabled = Boolean(issues.length);
+    const incompleteCount = suggestions.filter(item => !item.direction.trim() || (needsCopy && !item.copy_zh.trim())).length;
+    $('#export-button').disabled = false;
     const hasOurFacts = Boolean(state.analysis?.our_product);
-    $('#export-message').textContent = issues.length ? issues.slice(0, 3).join('；') : (hasOurFacts
+    $('#export-message').textContent = incompleteCount
+      ? `${incompleteCount} 项建议有字段待补充，仍可下载；空白处会标记“待补充”。`
+      : (hasOurFacts
       ? '分类方案已就绪。画面文案、设计建议和中英文指令会按类型写入模板。'
       : '目前只有参考商品事实。可导出参考分析；我方商品文案与生图指令留空，补充我方商品链接后可生成定制内容。');
-    $('#export-message').className = `validation-message${issues.length ? '' : ' ready'}`;
+    $('#export-message').className = `validation-message${incompleteCount ? '' : ' ready'}`;
   }
   async function copyText(text) {
     if (!text) throw new Error('没有可复制内容');
