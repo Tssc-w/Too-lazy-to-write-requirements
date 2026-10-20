@@ -19,6 +19,8 @@ Set-ExecutionPolicy -Scope Process Bypass
 
 接受任意平台的公开 `http://` 或 `https://` 商品页链接，不限制 Amazon。先尝试直连读取；直连失败时，使用当前访客自行提供的 Bright Data Web Unlocker 凭据重试。页面会保留两次尝试的状态和原因。仅支持公开网页：需要登录、验证码、JavaScript 才能生成商品内容、要求特定地区/会话，或主动禁止自动读取的页面仍可能失败；失败时会在对应商品卡和采集提醒中说明 HTTP 状态、域名解析、验证码、页面内容或服务配置等原因。工作台读取用户提供的链接，不自动搜索商品。
 
+韩国站点回退会使用 Bright Data 的 `kr` 地区；Coupang 还会请求浏览器渲染，并展示 Web Unlocker 返回的目标站状态和错误码。若 Coupang 仍返回 HTTP 403，页面会说明目标站拒绝或 Bright Data Zone 功能配置问题，用户可据此检查自己的 Zone；访问限制仍可能导致无法读取。
+
 ## AI 与采集配置
 
 每位使用者都填写自己的 OpenAI 兼容 API Key 和 Base URL。个人 Key 只保存在当前浏览器标签页的 `sessionStorage`，通过 HTTPS 请求头发送给本服务，不写入服务端设置、任务记录或日志；关闭标签页后浏览器会清除。AI API Base URL 必须使用 HTTPS。AI 调用费用由使用者自己的 API 账户承担。

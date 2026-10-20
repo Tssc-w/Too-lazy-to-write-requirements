@@ -489,19 +489,50 @@ def submit_with_context(executor, function, *args):
     return executor.submit(context.run, function, *args)
 
 
+def brightdata_response_diagnostics(headers, api_token=""):
+    if not headers:
+        return ""
+    details = []
+    for name, label in (
+        ("x-brd-status-code", "目标站 HTTP 状态"),
+        ("x-brd-error", "Bright Data 错误"),
+        ("x-brd-error-code", "Unlocker 错误码"),
+        ("x-brd-err-code", "代理错误码"),
+    ):
+        value = headers.get(name)
+        if value:
+            details.append(f"{label}：{redact_secrets(text(value, 300), api_token)}")
+    debug = headers.get("x-brd-debug")
+    if debug:
+        details.append("Bright Data 调试信息：" + redact_secrets(text(debug, 500), api_token))
+    return "；".join(details)
+
+
 def fetch_brightdata_product(url, role, api_token, zone):
     if not api_token or not zone:
         raise ValueError("本次请求未提供完整的 Bright Data API Key 和 Web Unlocker Zone。")
     normalized_url = _public_http_url(url)
-    body = json.dumps({"zone": zone, "url": normalized_url, "format": "raw"}).encode("utf-8")
+    host = (urllib.parse.urlsplit(normalized_url).hostname or "").lower().rstrip(".")
+    is_coupang = host == "coupang.com" or host.endswith(".coupang.com")
+    is_korean_site = is_coupang or host.endswith(".kr")
+    request_payload = {"zone": zone, "url": normalized_url, "format": "raw", "debug": True}
+    if is_korean_site:
+        request_payload["country"] = "kr"
+    if is_coupang:
+        request_payload["render"] = "true"
+    body = json.dumps(request_payload).encode("utf-8")
     request = urllib.request.Request("https://api.brightdata.com/request", data=body, method="POST", headers={
         "Authorization": "Bearer " + api_token,
         "Content-Type": "application/json",
         "Accept": "text/html,application/json",
     })
+    response_headers = None
+    response_status = None
     for attempt in range(2):
         try:
             with urllib.request.urlopen(request, timeout=90) as response:
+                response_status = response.status
+                response_headers = response.headers
                 response_body = response.read(6 * 1024 * 1024 + 1)
             if b"global adaptive rate limit" in response_body.lower() and attempt == 0:
                 time.sleep(3)
@@ -512,15 +543,15 @@ def fetch_brightdata_product(url, role, api_token, zone):
             if exc.code in (429, 503) and attempt == 0:
                 time.sleep(2)
                 continue
-            raise ValueError(f"Bright Data API 返回 HTTP {exc.code}：{text(detail, 700)}") from None
+            header_detail = brightdata_response_diagnostics(exc.headers, api_token)
+            suffix = f"；{header_detail}" if header_detail else ""
+            raise ValueError(f"Bright Data API 返回 HTTP {exc.code}：{text(detail, 700)}{suffix}") from None
         except (urllib.error.URLError, TimeoutError, OSError) as exc:
             reason = getattr(exc, "reason", exc)
             raise ValueError("Bright Data API 连接失败或超时：" + redact_secrets(text(reason, 500), api_token)) from None
     if len(response_body) > 6 * 1024 * 1024:
         raise ValueError("Bright Data 返回页面超过 6 MB，已停止读取。")
     source = response_body.decode("utf-8", errors="replace")
-    if not source.strip():
-        raise ValueError("Bright Data API 返回空页面。")
     try:
         wrapped = json.loads(source)
     except json.JSONDecodeError:
@@ -531,6 +562,22 @@ def fetch_brightdata_product(url, role, api_token, zone):
         source = wrapped.get("body") or wrapped.get("html") or wrapped.get("content") or source
         if not isinstance(source, str):
             source = text(source, 6 * 1024 * 1024)
+    if not source.strip():
+        diagnostics = brightdata_response_diagnostics(response_headers, api_token)
+        diagnostics = f"；{diagnostics}" if diagnostics else "；响应头没有提供目标站状态或错误详情"
+        target_status = response_headers.get("x-brd-status-code") if response_headers else None
+        unlocker_error = (response_headers.get("x-brd-error") or response_headers.get("x-brd-error-code") or "") if response_headers else ""
+        if is_coupang:
+            if target_status == "403" and not unlocker_error:
+                reason = "Coupang 返回 HTTP 403，表示目标站拒绝了这次读取。已对 Coupang 请求韩国地区并启用页面渲染；如果页面上方的 Bright Data 错误码为 premium，请检查该 Zone 是否启用了 Premium Domains，否则只能接受目标站的访问限制。"
+            elif unlocker_error == "premium":
+                reason = "Bright Data 提示该目标需要 Premium Domains 功能；请检查个人 Zone 是否启用此功能。已对 Coupang 请求韩国地区并启用页面渲染。"
+            else:
+                reason = "已对 Coupang 请求韩国地区并启用页面渲染；请根据 Bright Data 状态和错误头检查目标站响应及个人 Zone 配置。"
+        else:
+            reason = "请根据 Bright Data 状态和错误头检查目标站响应及个人 Zone 配置。"
+        api_status = f"Bright Data API HTTP {response_status}" if response_status is not None else "Bright Data API"
+        raise ValueError(f"{api_status} 返回空页面{diagnostics}。{reason}")
     return fetch_product(normalized_url, role, html_source=source, source_method="Bright Data")
 
 
